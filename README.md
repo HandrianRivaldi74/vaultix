@@ -90,9 +90,9 @@ Windows) + Security Event Log:
 Fitur-fitur besar berikut sedang dikerjakan bertahap, dari yang paling
 mudah ke paling kompleks:
 
-1. ✅ **Security Activity Log** — selesai (lihat di bawah).
-2. ⬜ Dashboard Security Status
-3. ⬜ PIN sebagai alternatif password
+1. ✅ **Security Activity Log** — selesai.
+2. ✅ **Dashboard Security Status** — selesai.
+3. ✅ **PIN sebagai alternatif password** — selesai (lihat di bawah).
 4. ⬜ Auto Lock berdasarkan aktivitas (idle, focus, lock/sleep/logout)
 5. ⬜ Multiple Vault (tiap vault: password/enkripsi/auto-lock/policy sendiri)
 6. ⬜ Windows Hello / Fingerprint / Face (lewat UserConsentVerifier)
@@ -106,6 +106,8 @@ mudah ke paling kompleks:
 11. ⬜ Mobile Remote Lock — **butuh infrastruktur terpisah** (backend
     server, API, push notification, aplikasi mobile). Di luar cakupan
     aplikasi desktop lokal ini.
+12. ⬜ Clipboard Protection — ditambahkan atas konfirmasi Anda, belum
+    dikerjakan.
 
 ## Fitur Baru: Security Activity Log
 
@@ -122,6 +124,67 @@ terakhir, entri lama otomatis dibuang). Kejadian yang dicatat saat ini:
 Bisa dibersihkan lewat tombol "Bersihkan Log" di jendela yang sama.
 Log ini akan jadi fondasi untuk fitur Auto Lock dan Dashboard di
 tahap berikutnya.
+
+## Fitur Baru: Dashboard Security Status
+
+Tombol **"📊 Dashboard"** menampilkan ringkasan status keamanan.
+**Prinsip penting**: dashboard ini menampilkan status **apa adanya** -
+tidak berpura-pura menampilkan fitur yang belum ada.
+
+- **Vault Security** — skor komposit dari kekuatan password + rasio
+  folder yang terkunci (Kuat/Sedang/Lemah).
+- **Encryption** — saat ini selalu "Nonaktif (mode: Kunci NTFS)" karena
+  Vaultix belum punya mode enkripsi sungguhan (ada di roadmap #7).
+- **Password** — kekuatan password master (Lemah/Sedang/Kuat), dihitung
+  dari panjang & variasi karakter saat password dibuat/diganti.
+- **Auto Lock** — saat ini selalu "Nonaktif" (roadmap #4, belum
+  tersedia).
+- **Clipboard Protection** — "Belum direncanakan". Ini muncul di contoh
+  dashboard yang Anda berikan tapi belum ada di daftar 11 fitur roadmap
+  — beri tahu kalau memang ingin ditambahkan sebagai fitur baru.
+- **Folder** — daftar semua folder dengan ikon 🔒/🔓 sesuai statusnya
+  (menggantikan konsep "Vaults" bernama di contoh Anda, karena Multiple
+  Vault baru ada di roadmap #5).
+
+## Fitur Baru: PIN sebagai Alternatif Password
+
+Tombol **"🔢 Atur PIN"** (butuh verifikasi password master dulu untuk
+mengaksesnya). PIN adalah kode 4-8 digit angka yang bisa dipakai
+**sebagai pengganti** password master di semua dialog verifikasi
+(kunci/buka kunci folder, dll) — password master tetap selalu bisa
+dipakai juga, PIN hanya alternatif tambahan yang lebih cepat diketik.
+
+- Disimpan sebagai hash terpisah (PBKDF2-HMAC-SHA256 + salt sendiri),
+  sama seperti password — tidak disimpan sebagai teks biasa.
+- Bisa dinonaktifkan kapan saja lewat tombol "Nonaktifkan PIN".
+- Semua aktivasi/perubahan/nonaktivasi PIN tercatat di Security
+  Activity Log.
+- **Catatan keamanan**: PIN yang pendek (4 digit) secara matematis
+  lebih mudah ditebak daripada password panjang — cocok untuk
+  kenyamanan sehari-hari di perangkat pribadi, tapi kalau butuh
+  keamanan maksimal, tetap andalkan password master yang kuat.
+
+## Perbaikan Penting #7 (Restrukturisasi UI: layout Sidebar)
+
+Sebelumnya 7 tombol (Tambah Folder, Dashboard, Hapus, Riwayat Akses,
+Aktivitas Keamanan, Atur PIN, Ganti Password) numpuk jadi satu baris di
+atas daftar folder — makin banyak fitur ditambahkan, makin sesak dan
+kaku. Sekarang aplikasi dirombak jadi **layout sidebar** (pola aplikasi
+modern), dengan 4 halaman:
+
+- **📁 Folders** — daftar folder + tombol Tambah/Hapus + Pilih Semua di
+  satu toolbar rapi, plus panel aksi (Sembunyikan/Kunci/Gabungan) di
+  bawahnya. Ini halaman utama/default saat aplikasi dibuka.
+- **📊 Dashboard** — Security Status, otomatis refresh setiap kali
+  halaman ini dibuka.
+- **🛡 Activity** — Security Activity Log, otomatis refresh setiap kali
+  halaman ini dibuka.
+- **⚙ Settings** — Ganti Password, Atur PIN, dan akses ke Riwayat Akses
+  Folder, masing-masing sebagai kartu terpisah dengan deskripsi singkat.
+
+Pemilihan tema Light/Dark/System dipindah ke bagian bawah sidebar (tetap
+selalu terlihat di halaman mana pun). Jendela diperlebar untuk
+menampung sidebar.
 
 ## Dependensi
 
@@ -154,22 +217,25 @@ File hasilnya ada di `dist\Vaultix.exe`.
 
 1. Jalankan aplikasi. Pertama kali dibuka, Anda diminta membuat
    **password master**.
-2. Klik **"+ Tambah Folder"** untuk membuka dialog pilih folder bawaan
-   Windows. Satu folder per klik — ulangi tombolnya untuk menambahkan
-   folder lain.
-3. **Centang** folder yang ingin diproses di kolom checkbox paling kiri
+2. Navigasi antar halaman lewat **sidebar kiri**: 📁 Folders (utama),
+   📊 Dashboard, 🛡 Activity, ⚙ Settings.
+3. Di halaman **Folders**, klik **"+ Tambah Folder"** untuk membuka
+   dialog pilih folder bawaan Windows. Satu folder per klik — ulangi
+   tombolnya untuk menambahkan folder lain.
+4. **Centang** folder yang ingin diproses di kolom checkbox paling kiri
    (atau klik **"Pilih Semua"** / **"Batal Pilih Semua"**), lalu pilih
    aksi yang diinginkan:
    - **Sembunyikan / Tampilkan** — tanpa password.
-   - **Kunci / Buka Kunci** — minta password master.
+   - **Kunci / Buka Kunci** — minta password master (atau PIN kalau
+     sudah diaktifkan).
    - **Kunci & Sembunyikan** / **Buka Kunci & Tampilkan** — gabungan
      keduanya.
-4. Ganti tema Light/Dark/System dari dropdown di pojok kanan atas.
-5. **Riwayat Akses Folder** untuk melihat file/folder yang baru-baru ini
-   dibuka di perangkat (berdasarkan data bawaan Windows).
-6. **Hapus dari Daftar** hanya bisa dilakukan untuk folder yang sudah
+5. **Hapus dari Daftar** hanya bisa dilakukan untuk folder yang sudah
    dalam kondisi terlihat & tidak terkunci (untuk mencegah folder
    terkunci "hilang jejak" dari daftar).
+6. Halaman **⚙ Settings** berisi Ganti Password, Atur PIN, dan tombol
+   ke Riwayat Akses Folder.
+7. Ganti tema Light/Dark/System dari dropdown di bagian bawah sidebar.
 
 ## Catatan Keamanan
 

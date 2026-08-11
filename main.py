@@ -95,6 +95,9 @@ def load_config():
     data.setdefault("folders", [])
     data.setdefault("theme", "System")
     data.setdefault("activity_log", [])
+    data.setdefault("pin_enabled", False)
+    data.setdefault("pin_hash", None)
+    data.setdefault("pin_salt", None)
     return data
 
 
@@ -121,10 +124,26 @@ def hash_password(password: str, salt: bytes) -> str:
     return dk.hex()
 
 
+def evaluate_password_strength(password: str) -> str:
+    length = len(password)
+    variety = sum([
+        any(c.islower() for c in password),
+        any(c.isupper() for c in password),
+        any(c.isdigit() for c in password),
+        any(not c.isalnum() for c in password),
+    ])
+    if length >= 12 and variety >= 3:
+        return "Kuat"
+    if length >= 8 and variety >= 2:
+        return "Sedang"
+    return "Lemah"
+
+
 def set_master_password(config, password: str):
     salt = secrets.token_bytes(16)
     config["salt"] = salt.hex()
     config["password_hash"] = hash_password(password, salt)
+    config["password_strength"] = evaluate_password_strength(password)
     save_config(config)
 
 
@@ -133,6 +152,28 @@ def verify_password(config, password: str) -> bool:
         return False
     salt = bytes.fromhex(config["salt"])
     return hash_password(password, salt) == config["password_hash"]
+
+
+def set_pin(config, pin: str):
+    salt = secrets.token_bytes(16)
+    config["pin_salt"] = salt.hex()
+    config["pin_hash"] = hash_password(pin, salt)
+    config["pin_enabled"] = True
+    save_config(config)
+
+
+def verify_pin(config, pin: str) -> bool:
+    if not config.get("pin_enabled") or not config.get("pin_hash") or not config.get("pin_salt"):
+        return False
+    salt = bytes.fromhex(config["pin_salt"])
+    return hash_password(pin, salt) == config["pin_hash"]
+
+
+def disable_pin(config):
+    config["pin_enabled"] = False
+    config["pin_hash"] = None
+    config["pin_salt"] = None
+    save_config(config)
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +422,7 @@ class VaultixApp(ctk.CTk):
 
         ctk.set_appearance_mode(self.config_data.get("theme", "System"))
 
-        WIDTH, HEIGHT = 900, 580
+        WIDTH, HEIGHT = 1020, 620
         self.geometry(f"{WIDTH}x{HEIGHT}")
         self.minsize(WIDTH, HEIGHT)
         center_window(self, WIDTH, HEIGHT)
@@ -476,35 +517,90 @@ class VaultixApp(ctk.CTk):
 
     # -- UI ---------------------------------------------------------------
     def build_ui(self):
-        top = ctk.CTkFrame(self, corner_radius=0)
-        top.pack(fill="x")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(
-            top, text="🗄  Vaultix", font=ctk.CTkFont(size=20, weight="bold")
-        ).pack(side="left", padx=15, pady=12)
+        # -- sidebar --
+        sidebar = ctk.CTkFrame(self, width=190, corner_radius=0)
+        sidebar.grid(row=0, column=0, sticky="nsw")
+        sidebar.grid_propagate(False)
 
+        ctk.CTkLabel(sidebar, text="🗄 Vaultix", font=ctk.CTkFont(size=20, weight="bold")).pack(padx=20, pady=(25, 20), anchor="w")
+
+        self.nav_buttons = {}
+        nav_items = [
+            ("folders", "📁 Folders"),
+            ("dashboard", "📊 Dashboard"),
+            ("activity", "🛡 Activity"),
+            ("settings", "⚙ Settings"),
+        ]
+        for key, label in nav_items:
+            btn = ctk.CTkButton(
+                sidebar, text=label, anchor="w", width=160, height=38,
+                fg_color="transparent",
+                command=lambda k=key: self.show_view(k),
+            )
+            btn.pack(padx=15, pady=4)
+            self.nav_buttons[key] = btn
+
+        ctk.CTkLabel(sidebar, text="").pack(expand=True, fill="both")  # spacer
+
+        ctk.CTkLabel(sidebar, text="Tema", text_color="#888888").pack(padx=20, anchor="w")
         self.theme_menu = ctk.CTkOptionMenu(
-            top, values=["System", "Light", "Dark"], command=self.on_theme_change, width=110
+            sidebar, values=["System", "Light", "Dark"], command=self.on_theme_change, width=160
         )
         self.theme_menu.set(self.config_data.get("theme", "System"))
-        self.theme_menu.pack(side="right", padx=15, pady=12)
+        self.theme_menu.pack(padx=15, pady=(2, 20))
 
-        ctk.CTkLabel(top, text="Tema:").pack(side="right", pady=12)
+        # -- area konten (4 view ditumpuk, ditukar lewat show_view) --
+        content_container = ctk.CTkFrame(self, fg_color="transparent")
+        content_container.grid(row=0, column=1, sticky="nsew")
+        content_container.grid_rowconfigure(0, weight=1)
+        content_container.grid_columnconfigure(0, weight=1)
 
-        # -- daftar folder --
-        list_frame = ctk.CTkFrame(self)
-        list_frame.pack(fill="both", expand=True, padx=15, pady=(10, 5))
+        self.views = {}
+        for key, _ in nav_items:
+            frame = ctk.CTkFrame(content_container, fg_color="transparent")
+            frame.grid(row=0, column=0, sticky="nsew")
+            self.views[key] = frame
 
-        header_row = ctk.CTkFrame(list_frame, fg_color="transparent")
-        header_row.pack(fill="x", padx=10, pady=(10, 0))
-        ctk.CTkLabel(
-            header_row, text="Daftar Folder", font=ctk.CTkFont(size=14, weight="bold")
-        ).pack(side="left")
-        ctk.CTkButton(header_row, text="Pilih Semua", width=110, command=self.select_all).pack(side="right", padx=(6, 0))
+        self._build_folders_view(self.views["folders"])
+        self._build_dashboard_view(self.views["dashboard"])
+        self._build_activity_view(self.views["activity"])
+        self._build_settings_view(self.views["settings"])
+
+        self.show_view("folders")
+
+    def show_view(self, key):
+        self.views[key].tkraise()
+        for k, btn in self.nav_buttons.items():
+            btn.configure(fg_color=("gray75", "gray25") if k == key else "transparent")
+        if key == "dashboard":
+            self._build_dashboard_view(self.views["dashboard"])
+        elif key == "activity":
+            self.refresh_activity_log()
+
+    # -- view: daftar folder + aksi -----------------------------------------
+    def _build_folders_view(self, parent):
+        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=1)
+
+        toolbar = ctk.CTkFrame(parent, fg_color="transparent")
+        toolbar.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 10))
+        ctk.CTkLabel(toolbar, text="Daftar Folder", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        ctk.CTkButton(toolbar, text="+ Tambah Folder", width=140, command=self.open_add_dialog).pack(side="left", padx=(20, 8))
         ctk.CTkButton(
-            header_row, text="Batal Pilih Semua", width=130, fg_color="gray40", hover_color="gray30",
+            toolbar, text="Hapus dari Daftar", width=140, fg_color="#8a3b3b", hover_color="#6e2f2f",
+            command=self.remove_selected,
+        ).pack(side="left")
+        ctk.CTkButton(toolbar, text="Pilih Semua", width=110, command=self.select_all).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(
+            toolbar, text="Batal Pilih Semua", width=130, fg_color="gray40", hover_color="gray30",
             command=self.deselect_all,
         ).pack(side="right")
+
+        list_frame = ctk.CTkFrame(parent)
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 10))
 
         tree_container = ctk.CTkFrame(list_frame, fg_color="transparent")
         tree_container.pack(fill="both", expand=True, padx=10, pady=10)
@@ -526,18 +622,9 @@ class VaultixApp(ctk.CTk):
         sb.pack(side="right", fill="y")
         self.tree.configure(yscrollcommand=sb.set)
 
-        # -- tombol kelola daftar --
-        manage_frame = ctk.CTkFrame(self, fg_color="transparent")
-        manage_frame.pack(fill="x", padx=15, pady=(0, 5))
-        ctk.CTkButton(manage_frame, text="+ Tambah Folder", width=140, command=self.open_add_dialog).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(manage_frame, text="Hapus dari Daftar", width=140, command=self.remove_selected, fg_color="#8a3b3b", hover_color="#6e2f2f").pack(side="left", padx=8)
-        ctk.CTkButton(manage_frame, text="Riwayat Akses Folder", width=160, command=self.show_access_history).pack(side="left", padx=8)
-        ctk.CTkButton(manage_frame, text="🛡 Aktivitas Keamanan", width=160, command=self.show_security_activity).pack(side="left", padx=8)
-        ctk.CTkButton(manage_frame, text="Ganti Password", width=140, command=self.change_password).pack(side="right")
-
         # -- tombol aksi --
-        action_frame = ctk.CTkFrame(self)
-        action_frame.pack(fill="x", padx=15, pady=(5, 15))
+        action_frame = ctk.CTkFrame(parent)
+        action_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 20))
 
         visibility_box = ctk.CTkFrame(action_frame, fg_color="transparent")
         visibility_box.pack(side="left", expand=True, fill="both", padx=15, pady=12)
@@ -562,6 +649,35 @@ class VaultixApp(ctk.CTk):
         ctk.CTkLabel(combo_box, text="Gabungan (butuh password)", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
         ctk.CTkButton(combo_box, text="Kunci & Sembunyikan", width=220, command=self.action_lock_and_hide).pack(fill="x", pady=(8, 4))
         ctk.CTkButton(combo_box, text="Buka Kunci & Tampilkan", width=220, command=self.action_unlock_and_unhide).pack(fill="x")
+
+    # -- view: pengaturan -----------------------------------------------------
+    def _build_settings_view(self, parent):
+        ctk.CTkLabel(parent, text="⚙ Settings", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=25, pady=(20, 15))
+
+        def setting_row(title, desc, btn_text, command, danger=False):
+            box = ctk.CTkFrame(parent)
+            box.pack(fill="x", padx=25, pady=6)
+            inner = ctk.CTkFrame(box, fg_color="transparent")
+            inner.pack(fill="x", padx=15, pady=12)
+            text_col = ctk.CTkFrame(inner, fg_color="transparent")
+            text_col.pack(side="left", fill="x", expand=True)
+            ctk.CTkLabel(text_col, text=title, font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w")
+            ctk.CTkLabel(text_col, text=desc, text_color="#888888", anchor="w", wraplength=460, justify="left").pack(anchor="w")
+            kwargs = {"fg_color": "#8a3b3b", "hover_color": "#6e2f2f"} if danger else {}
+            ctk.CTkButton(inner, text=btn_text, width=140, command=command, **kwargs).pack(side="right")
+
+        setting_row(
+            "Password Master", "Ganti password master yang dipakai untuk semua verifikasi.",
+            "Ganti Password", self.change_password,
+        )
+        setting_row(
+            "PIN", "Atur PIN 4-8 digit sebagai alternatif password master untuk verifikasi cepat.",
+            "Atur PIN", self.open_pin_settings,
+        )
+        setting_row(
+            "Riwayat Akses Folder", "Lihat folder/file yang baru-baru ini dibuka di perangkat ini (mode ringan & audit log lengkap).",
+            "Buka", self.show_access_history,
+        )
 
     # -- theme --------------------------------------------------------------
     def on_theme_change(self, value):
@@ -624,14 +740,20 @@ class VaultixApp(ctk.CTk):
         return [e for e in folders if e["path"] in self.checked_paths]
 
     def ask_master_password(self, title="Verifikasi Password") -> bool:
-        pw = self.ask_password_dialog(title, "Masukkan password master:")
+        prompt = "Masukkan password master:"
+        if self.config_data.get("pin_enabled"):
+            prompt += "\n(atau PIN Anda)"
+        pw = self.ask_password_dialog(title, prompt)
         if pw is None:
             return False
-        if not verify_password(self.config_data, pw):
-            messagebox.showerror("Error", "Password salah.")
-            log_event(self.config_data, "Percobaan password salah")
-            return False
-        return True
+        if verify_password(self.config_data, pw):
+            return True
+        if self.config_data.get("pin_enabled") and verify_pin(self.config_data, pw):
+            log_event(self.config_data, "Verifikasi berhasil menggunakan PIN")
+            return True
+        messagebox.showerror("Error", "Password/PIN salah.")
+        log_event(self.config_data, "Percobaan password/PIN salah")
+        return False
 
     def show_result_summary(self, success, failed, verb_success, verb_failed):
         summary = f"{len(success)} folder {verb_success}."
@@ -830,52 +952,126 @@ class VaultixApp(ctk.CTk):
         save_config(self.config_data)
         self.refresh_list()
 
-    # -- security activity log -------------------------------------------
-    def show_security_activity(self):
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Aktivitas Keamanan")
-        W, H = 640, 480
-        dialog.geometry(f"{W}x{H}")
-        center_window(dialog, W, H)
-        dialog.transient(self)
+    # -- dashboard security status ----------------------------------------
+    def _build_dashboard_view(self, parent):
+        for w in parent.winfo_children():
+            w.destroy()
 
+        folders = self.config_data.get("folders", [])
+        total = len(folders)
+        locked_count = sum(1 for f in folders if f.get("locked"))
+        hidden_count = sum(1 for f in folders if f.get("hidden"))
+
+        pw_strength = self.config_data.get("password_strength", "Tidak diketahui")
+        pw_color = {"Kuat": "green", "Sedang": "yellow"}.get(pw_strength, "red")
+
+        score = 0
+        score += {"Kuat": 2, "Sedang": 1}.get(pw_strength, 0)
+        if total > 0 and locked_count == total:
+            score += 2
+        elif locked_count > 0:
+            score += 1
+        if score >= 4:
+            vault_label, vault_color = "Kuat", "green"
+        elif score >= 2:
+            vault_label, vault_color = "Sedang", "yellow"
+        else:
+            vault_label, vault_color = "Lemah", "red"
+
+        def status_row(box, label, value, color, note=None):
+            dot = {"green": "🟢", "yellow": "🟡", "red": "🔴"}[color]
+            row = ctk.CTkFrame(box, fg_color="transparent")
+            row.pack(fill="x", pady=3)
+            ctk.CTkLabel(row, text=f"{dot} {label}", anchor="w", width=190, font=ctk.CTkFont(size=13)).pack(side="left")
+            ctk.CTkLabel(row, text=value, anchor="w", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+            if note:
+                ctk.CTkLabel(box, text=note, text_color="#888888", wraplength=520, justify="left").pack(anchor="w", padx=(28, 0), pady=(0, 4))
+
+        header = ctk.CTkFrame(parent, fg_color="transparent")
+        header.pack(fill="x", padx=25, pady=(20, 10))
+        ctk.CTkLabel(header, text="SECURITY STATUS", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        ctk.CTkButton(header, text="Refresh", width=90, command=lambda: self._build_dashboard_view(parent)).pack(side="right")
+
+        status_box = ctk.CTkFrame(parent)
+        status_box.pack(fill="x", padx=25, pady=(0, 15))
+        inner = ctk.CTkFrame(status_box, fg_color="transparent")
+        inner.pack(fill="x", padx=15, pady=15)
+
+        status_row(inner, "Vault Security", vault_label, vault_color)
+        status_row(
+            inner, "Encryption", "Nonaktif (mode: Kunci NTFS)", "red",
+            note="Bukan enkripsi sungguhan - lihat 'Mode Encryption (AES-256)' di roadmap #7, belum tersedia.",
+        )
+        status_row(inner, "Password", pw_strength, pw_color)
+        status_row(
+            inner, "Auto Lock", "Nonaktif", "red",
+            note="Fitur kunci otomatis berdasarkan aktivitas ada di roadmap #4, belum tersedia.",
+        )
+        status_row(
+            inner, "Clipboard Protection", "Belum direncanakan", "red",
+            note="Ada di roadmap #12, belum dikerjakan.",
+        )
+
+        ctk.CTkLabel(parent, text="Folder", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=25, pady=(0, 0))
         ctk.CTkLabel(
-            dialog,
+            parent, text=f"{locked_count} dari {total} folder terkunci · {hidden_count} dari {total} tersembunyi",
+            text_color="#888888",
+        ).pack(anchor="w", padx=25, pady=(0, 8))
+
+        list_box = ctk.CTkScrollableFrame(parent)
+        list_box.pack(fill="both", expand=True, padx=25, pady=(0, 20))
+
+        if not folders:
+            ctk.CTkLabel(list_box, text="Belum ada folder di daftar.", text_color="#888888").pack(anchor="w", pady=10)
+        else:
+            for entry in folders:
+                row = ctk.CTkFrame(list_box, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+                name = os.path.basename(entry["path"].rstrip("\\/")) or entry["path"]
+                icon = "🔒" if entry.get("locked") else "🔓"
+                ctk.CTkLabel(row, text=name, anchor="w", width=280).pack(side="left")
+                ctk.CTkLabel(row, text=icon, anchor="e").pack(side="left")
+
+    # -- security activity log -------------------------------------------
+    def _build_activity_view(self, parent):
+        ctk.CTkLabel(
+            parent, text="🛡 Aktivitas Keamanan", font=ctk.CTkFont(size=18, weight="bold"),
+        ).pack(anchor="w", padx=25, pady=(20, 5))
+        ctk.CTkLabel(
+            parent,
             text="Catatan kejadian keamanan Vaultix: password diverifikasi/salah,\n"
                  "folder dikunci/dibuka, dan aksi lainnya. Disimpan lokal di perangkat ini.",
-            justify="left",
-        ).pack(anchor="w", padx=15, pady=(15, 5))
+            justify="left", text_color="#888888",
+        ).pack(anchor="w", padx=25, pady=(0, 10))
 
         columns = ("time", "event")
-        tree = ttk.Treeview(dialog, columns=columns, show="headings", height=16)
-        tree.heading("time", text="Waktu")
-        tree.heading("event", text="Kejadian")
-        tree.column("time", width=160)
-        tree.column("event", width=420)
-        tree.pack(fill="both", expand=True, padx=15)
-
-        def refresh():
-            for row in tree.get_children():
-                tree.delete(row)
-            entries = list(reversed(self.config_data.get("activity_log", [])))
-            for entry in entries:
-                tree.insert("", tk.END, values=(entry["time"], entry["event"]))
+        self.activity_tree = ttk.Treeview(parent, columns=columns, show="headings", height=16)
+        self.activity_tree.heading("time", text="Waktu")
+        self.activity_tree.heading("event", text="Kejadian")
+        self.activity_tree.column("time", width=160)
+        self.activity_tree.column("event", width=500)
+        self.activity_tree.pack(fill="both", expand=True, padx=25)
 
         def clear_log():
-            if not messagebox.askyesno("Konfirmasi", "Hapus seluruh riwayat aktivitas keamanan?", parent=dialog):
+            if not messagebox.askyesno("Konfirmasi", "Hapus seluruh riwayat aktivitas keamanan?"):
                 return
             self.config_data["activity_log"] = []
             save_config(self.config_data)
-            refresh()
+            self.refresh_activity_log()
 
-        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_row.pack(fill="x", padx=15, pady=10)
-        ctk.CTkButton(btn_row, text="Refresh", command=refresh).pack(side="right")
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.pack(fill="x", padx=25, pady=15)
+        ctk.CTkButton(btn_row, text="Refresh", width=90, command=self.refresh_activity_log).pack(side="right")
         ctk.CTkButton(
-            btn_row, text="Bersihkan Log", fg_color="gray40", hover_color="gray30", command=clear_log,
+            btn_row, text="Bersihkan Log", width=120, fg_color="gray40", hover_color="gray30", command=clear_log,
         ).pack(side="right", padx=8)
 
-        refresh()
+    def refresh_activity_log(self):
+        for row in self.activity_tree.get_children():
+            self.activity_tree.delete(row)
+        entries = list(reversed(self.config_data.get("activity_log", [])))
+        for entry in entries:
+            self.activity_tree.insert("", tk.END, values=(entry["time"], entry["event"]))
 
     # -- riwayat akses folder -------------------------------------------
     def show_access_history(self):
@@ -1062,6 +1258,67 @@ class VaultixApp(ctk.CTk):
         set_master_password(self.config_data, pw)
         log_event(self.config_data, "Password master diganti")
         messagebox.showinfo("Sukses", "Password master berhasil diganti.")
+
+    # -- atur PIN -----------------------------------------------------------
+    def open_pin_settings(self):
+        if not self.ask_master_password("Verifikasi Password Master"):
+            return
+
+        box = ctk.CTkToplevel(self)
+        box.title("Atur PIN")
+        W, H = 400, 300
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.resizable(False, False)
+
+        status = "Aktif" if self.config_data.get("pin_enabled") else "Nonaktif"
+        ctk.CTkLabel(box, text=f"Status PIN saat ini: {status}", font=ctk.CTkFont(weight="bold")).pack(padx=20, pady=(20, 10))
+        ctk.CTkLabel(
+            box, text="PIN adalah alternatif password yang lebih pendek (4-8 digit\nangka) untuk verifikasi cepat kunci/buka kunci folder.",
+            wraplength=360, justify="left", text_color="#888888",
+        ).pack(padx=20, pady=(0, 10))
+
+        entry1 = ctk.CTkEntry(box, show="*", width=300, placeholder_text="PIN baru (4-8 digit angka)")
+        entry1.pack(padx=20, pady=4)
+        entry2 = ctk.CTkEntry(box, show="*", width=300, placeholder_text="Ulangi PIN baru")
+        entry2.pack(padx=20, pady=4)
+
+        error_var = tk.StringVar(value="")
+        ctk.CTkLabel(box, textvariable=error_var, text_color="#e05555", wraplength=360).pack(pady=(6, 0))
+
+        def save_pin():
+            pin1 = entry1.get().strip()
+            pin2 = entry2.get().strip()
+            if not pin1.isdigit() or not (4 <= len(pin1) <= 8):
+                error_var.set("PIN harus berupa angka, panjang 4-8 digit.")
+                return
+            if pin1 != pin2:
+                error_var.set("PIN tidak cocok, coba lagi.")
+                return
+            set_pin(self.config_data, pin1)
+            log_event(self.config_data, "PIN diaktifkan/diperbarui")
+            messagebox.showinfo("Sukses", "PIN berhasil disimpan.", parent=box)
+            box.destroy()
+
+        def remove_pin():
+            if not self.config_data.get("pin_enabled"):
+                messagebox.showinfo("Info", "PIN memang belum aktif.", parent=box)
+                return
+            if not messagebox.askyesno("Konfirmasi", "Nonaktifkan PIN? Anda hanya bisa memakai password master setelah ini.", parent=box):
+                return
+            disable_pin(self.config_data)
+            log_event(self.config_data, "PIN dinonaktifkan")
+            messagebox.showinfo("Sukses", "PIN dinonaktifkan.", parent=box)
+            box.destroy()
+
+        btn_frame = ctk.CTkFrame(box, fg_color="transparent")
+        btn_frame.pack(pady=15)
+        ctk.CTkButton(btn_frame, text="Simpan PIN", width=110, command=save_pin).pack(side="left", padx=5)
+        ctk.CTkButton(
+            btn_frame, text="Nonaktifkan PIN", width=130, fg_color="gray40", hover_color="gray30", command=remove_pin,
+        ).pack(side="left", padx=5)
 
 
 def main():
