@@ -93,8 +93,6 @@ def load_config():
         data["folders"] = migrated
     data.setdefault("folders", [])
     data.setdefault("theme", "System")
-    for entry in data["folders"]:
-        entry.setdefault("tag", "")
     return data
 
 
@@ -287,6 +285,7 @@ class VaultixApp(ctk.CTk):
         super().__init__()
         self.title("Vaultix")
         self.config_data = load_config()
+        self.checked_paths = set()
 
         ctk.set_appearance_mode(self.config_data.get("theme", "System"))
 
@@ -402,24 +401,32 @@ class VaultixApp(ctk.CTk):
         list_frame = ctk.CTkFrame(self)
         list_frame.pack(fill="both", expand=True, padx=15, pady=(10, 5))
 
+        header_row = ctk.CTkFrame(list_frame, fg_color="transparent")
+        header_row.pack(fill="x", padx=10, pady=(10, 0))
         ctk.CTkLabel(
-            list_frame, text="Daftar Folder", font=ctk.CTkFont(size=14, weight="bold")
-        ).pack(anchor="w", padx=10, pady=(10, 0))
+            header_row, text="Daftar Folder", font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(side="left")
+        ctk.CTkButton(header_row, text="Pilih Semua", width=110, command=self.select_all).pack(side="right", padx=(6, 0))
+        ctk.CTkButton(
+            header_row, text="Batal Pilih Semua", width=130, fg_color="gray40", hover_color="gray30",
+            command=self.deselect_all,
+        ).pack(side="right")
 
         tree_container = ctk.CTkFrame(list_frame, fg_color="transparent")
         tree_container.pack(fill="both", expand=True, padx=10, pady=10)
 
-        columns = ("path", "hidden", "locked", "tag")
-        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="extended", height=10)
+        columns = ("check", "path", "hidden", "locked")
+        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="none", height=10)
+        self.tree.heading("check", text="✓")
         self.tree.heading("path", text="Folder")
         self.tree.heading("hidden", text="Status Tampilan")
         self.tree.heading("locked", text="Status Kunci")
-        self.tree.heading("tag", text="Tanda")
-        self.tree.column("path", width=300)
-        self.tree.column("hidden", width=130, anchor="center")
-        self.tree.column("locked", width=130, anchor="center")
-        self.tree.column("tag", width=140, anchor="center")
+        self.tree.column("check", width=40, anchor="center")
+        self.tree.column("path", width=320)
+        self.tree.column("hidden", width=140, anchor="center")
+        self.tree.column("locked", width=140, anchor="center")
         self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Button-1>", self.on_tree_click)
 
         sb = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
         sb.pack(side="right", fill="y")
@@ -429,7 +436,6 @@ class VaultixApp(ctk.CTk):
         manage_frame = ctk.CTkFrame(self, fg_color="transparent")
         manage_frame.pack(fill="x", padx=15, pady=(0, 5))
         ctk.CTkButton(manage_frame, text="+ Tambah Folder", width=140, command=self.open_add_dialog).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(manage_frame, text="🏷 Tandai Folder", width=140, command=self.open_tag_dialog).pack(side="left", padx=8)
         ctk.CTkButton(manage_frame, text="Hapus dari Daftar", width=140, command=self.remove_selected, fg_color="#8a3b3b", hover_color="#6e2f2f").pack(side="left", padx=8)
         ctk.CTkButton(manage_frame, text="Riwayat Akses Folder", width=160, command=self.show_access_history).pack(side="left", padx=8)
         ctk.CTkButton(manage_frame, text="Ganti Password", width=140, command=self.change_password).pack(side="right")
@@ -485,18 +491,42 @@ class VaultixApp(ctk.CTk):
     def refresh_list(self):
         for row in self.tree.get_children():
             self.tree.delete(row)
-        for entry in self.config_data.get("folders", []):
+        folders = self.config_data.get("folders", [])
+        valid_paths = {e["path"] for e in folders}
+        self.checked_paths &= valid_paths  # buang path yang sudah tidak ada di daftar
+        for entry in folders:
             hide_part, lock_part = status_text(entry)
-            tag_part = entry.get("tag") or "-"
-            self.tree.insert("", tk.END, iid=entry["path"], values=(entry["path"], hide_part, lock_part, tag_part))
+            check_symbol = "☑" if entry["path"] in self.checked_paths else "☐"
+            self.tree.insert("", tk.END, iid=entry["path"], values=(check_symbol, entry["path"], hide_part, lock_part))
+
+    def on_tree_click(self, event):
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        col = self.tree.identify_column(event.x)
+        row = self.tree.identify_row(event.y)
+        if not row or col != "#1":
+            return
+        if row in self.checked_paths:
+            self.checked_paths.discard(row)
+        else:
+            self.checked_paths.add(row)
+        self.tree.set(row, "check", "☑" if row in self.checked_paths else "☐")
+
+    def select_all(self):
+        self.checked_paths = {e["path"] for e in self.config_data.get("folders", [])}
+        self.refresh_list()
+
+    def deselect_all(self):
+        self.checked_paths = set()
+        self.refresh_list()
 
     def get_selected_entries(self):
-        paths = self.tree.selection()
-        if not paths:
-            messagebox.showwarning("Info", "Pilih satu atau beberapa folder di daftar terlebih dahulu.")
+        if not self.checked_paths:
+            messagebox.showwarning("Info", "Centang satu atau beberapa folder di daftar terlebih dahulu.")
             return []
         folders = self.config_data.get("folders", [])
-        return [e for e in folders if e["path"] in paths]
+        return [e for e in folders if e["path"] in self.checked_paths]
 
     def ask_master_password(self, title="Verifikasi Password") -> bool:
         pw = self.ask_password_dialog(title, "Masukkan password master:")
@@ -628,7 +658,7 @@ class VaultixApp(ctk.CTk):
                 messagebox.showwarning("Info", "Belum ada folder yang ditambahkan.", parent=dialog)
                 return
             for p in staged_paths:
-                self.config_data.setdefault("folders", []).append({"path": p, "hidden": False, "locked": False, "tag": ""})
+                self.config_data.setdefault("folders", []).append({"path": p, "hidden": False, "locked": False})
             save_config(self.config_data)
             self.refresh_list()
             dialog.destroy()
@@ -726,57 +756,6 @@ class VaultixApp(ctk.CTk):
             entries, worker, "Membuka Semua...",
             "berhasil dibuka semua", "dibuka",
         )
-
-    # -- tandai folder -----------------------------------------------------
-    def open_tag_dialog(self):
-        entries = self.get_selected_entries()
-        if not entries:
-            return
-
-        box = ctk.CTkToplevel(self)
-        box.title("Tandai Folder")
-        W, H = 420, 240
-        box.geometry(f"{W}x{H}")
-        center_window(box, W, H)
-        box.transient(self)
-        box.grab_set()
-        box.resizable(False, False)
-
-        if len(entries) == 1:
-            info_text = f"Beri tanda/label untuk:\n{entries[0]['path']}"
-        else:
-            info_text = f"Beri tanda/label yang sama untuk {len(entries)} folder terpilih."
-        ctk.CTkLabel(box, text=info_text, wraplength=380, justify="left").pack(padx=20, pady=(20, 10))
-
-        default_value = entries[0].get("tag", "") if len(entries) == 1 else ""
-        entry = ctk.CTkEntry(box, width=340, placeholder_text="Contoh: Penting, Kerja, Pribadi")
-        entry.pack(padx=20, pady=4)
-        if default_value:
-            entry.insert(0, default_value)
-        entry.focus_set()
-
-        def save():
-            value = entry.get().strip()
-            for e in entries:
-                e["tag"] = value
-            save_config(self.config_data)
-            self.refresh_list()
-            box.destroy()
-
-        def clear_tag():
-            for e in entries:
-                e["tag"] = ""
-            save_config(self.config_data)
-            self.refresh_list()
-            box.destroy()
-
-        entry.bind("<Return>", lambda ev: save())
-
-        btn_frame = ctk.CTkFrame(box, fg_color="transparent")
-        btn_frame.pack(pady=18)
-        ctk.CTkButton(btn_frame, text="Simpan", width=110, command=save).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="Hapus Tanda", width=110, fg_color="gray40", hover_color="gray30", command=clear_tag).pack(side="left", padx=5)
-        ctk.CTkButton(btn_frame, text="Batal", width=110, fg_color="gray40", hover_color="gray30", command=box.destroy).pack(side="left", padx=5)
 
     # -- hapus dari daftar ------------------------------------------------------
     def remove_selected(self):

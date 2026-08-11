@@ -10,105 +10,49 @@ diulang-ulang kapan saja, tidak sekali pakai.
    akan selalu ada di daftar ini, apa pun statusnya. Menambah folder ke
    daftar TIDAK langsung menyembunyikan/mengunci apa pun — itu aksi
    terpisah yang Anda pilih sendiri setelahnya.
-2. **Sembunyikan / Tampilkan** (tanpa password) — folder diberi/dihapus
+2. **Checkbox seleksi** — setiap baris punya kotak centang (☐/☑) di
+   kolom paling kiri. Centang folder yang ingin dikenai aksi, atau pakai
+   tombol **Pilih Semua** / **Batal Pilih Semua** di atas tabel.
+3. **Sembunyikan / Tampilkan** (tanpa password) — folder diberi/dihapus
    atribut Windows `Hidden + System`, sehingga hilang/muncul lagi dari
    File Explorer. Sifatnya cuma kerapian tampilan, cepat, reversible
    kapan saja.
-3. **Kunci / Buka Kunci** (butuh password master) — folder diberi/dihapus
-   izin **Deny** lewat `icacls` (NTFS permission) untuk akun Windows Anda
-   saat ini, sehingga folder benar-benar tidak bisa dibuka ("Access is
-   denied") sampai dibuka lagi lewat Vaultix dengan password yang benar.
-   Ini proteksi akses sungguhan, bukan sekadar sembunyi — tapi tetap
-   **bukan enkripsi**: isi file tidak diubah sama sekali.
-4. **Kunci & Sembunyikan** / **Buka Semua** — tombol gabungan untuk
-   melakukan keduanya sekaligus dengan satu kali password.
+4. **Kunci / Buka Kunci** (butuh password master) — folder diberi/dihapus
+   izin **Deny (Modify)** lewat `icacls` (NTFS permission) untuk akun
+   Windows Anda saat ini, sehingga folder benar-benar tidak bisa dibuka
+   ("Access is denied") sampai dibuka lagi lewat Vaultix dengan password
+   yang benar. Ini proteksi akses sungguhan, bukan sekadar sembunyi —
+   tapi tetap **bukan enkripsi**: isi file tidak diubah sama sekali.
+5. **Kunci & Sembunyikan** / **Buka Kunci & Tampilkan** — tombol gabungan
+   untuk melakukan keduanya sekaligus dengan satu kali password. Urutan
+   internalnya penting dan sudah ditangani otomatis: menyembunyikan dulu
+   baru mengunci (karena izin kunci turut memblokir hak ubah atribut),
+   dan sebaliknya saat membuka.
 
 Password disimpan sebagai hash (PBKDF2-HMAC-SHA256 + salt) di
 `%USERPROFILE%\.vaultix\config.json`, bukan sebagai teks biasa.
 
-## Yang Baru di Versi Ini
+## Riwayat Perbaikan Penting
 
-- Tampilan dibangun ulang pakai **CustomTkinter** (tema modern, ada mode
-  **Light / Dark / System** yang bisa diganti dari pojok kanan atas dan
-  tersimpan otomatis untuk sesi berikutnya).
-- Semua jendela (utama & dialog) otomatis **center di layar**.
-- Folder di daftar tidak lagi "hilang kegunaannya" setelah dibuka — semua
-  aksi (sembunyikan/tampilkan/kunci/buka kunci) bisa diulang kapan saja
-  selama folder masih ada di daftar.
-- Fitur **Riwayat Akses Folder** tetap ada (baca data yang sudah dicatat
-  Windows, tanpa proses background).
-
-## Perbaikan Penting (baca kalau upgrade dari versi sebelumnya)
-
-Versi sebelumnya memakai izin **Full Control ("F")** saat mengunci folder
-lewat `icacls`. Ini bug: Full Control mencakup hak mengubah izin folder
-itu sendiri (WRITE_DAC), jadi begitu di-deny, akun Anda ikut kehilangan
-hak untuk membuka kunci lagi — bisa memicu `Access is denied` bahkan
-lewat tombol "Buka Kunci" di aplikasi.
-
-Versi ini sudah diperbaiki untuk memakai izin **Modify ("M")** saja saat
-mengunci — tetap memblokir baca/tulis/hapus isi folder, tapi tidak
-memblokir hak mengubah izin, sehingga folder selalu bisa dibuka kunci
-lagi lewat aplikasi.
-
-**Kalau ada folder yang sudah terlanjur terkunci dengan versi lama** dan
-tombol "Buka Kunci" gagal dengan `Access is denied`, perbaiki manual lewat
-Command Prompt **yang dijalankan sebagai Administrator**:
-
-```
-icacls "C:\path\folder" /remove:d %USERNAME%
-```
-
-Kalau masih gagal juga, sebagai jalan terakhir:
-
-```
-takeown /F "C:\path\folder" /R /D Y
-icacls "C:\path\folder" /reset /T
-```
-
-
-
-## Perbaikan Penting #2 (urutan Sembunyikan & Kunci + progress bar)
-
-Izin **"Modify"** yang dipakai untuk mengunci ternyata juga mencakup hak
-**Write Attributes** (hak yang dibutuhkan untuk mengubah atribut
-Hidden/System). Karena itu, tombol gabungan **"Kunci & Sembunyikan"**
-sekarang menjalankan **Sembunyikan dulu, baru Kunci** — kalau dibalik,
-langkah menyembunyikan akan gagal karena hak mengubah atribut sudah lebih
-dulu diblokir oleh kunci. Sebaliknya, **"Buka Semua"** menjalankan Buka
-Kunci dulu, baru Tampilkan.
-
-Setiap aksi (Sembunyikan/Tampilkan/Kunci/Buka Kunci/Gabungan) sekarang
-juga menampilkan **progress bar** dan berjalan di background thread,
-supaya jendela aplikasi tidak tampak macet saat memproses folder
-berukuran besar (operasi `icacls` pada folder besar bisa memakan waktu
-karena diterapkan ke semua isi folder secara rekursif).
-
-**Kalau ada folder yang sudah terlanjur dalam kondisi "Terkunci" tapi
-tidak "Tersembunyi"** (akibat bug urutan versi sebelumnya): klik **"Buka
-Kunci"** dulu, lalu klik **"Sembunyikan"**, lalu klik **"Kunci"** lagi
-kalau memang ingin folder itu tersembunyi sekaligus terkunci.
-
-## Perbaikan Penting #3 (dialog password kini ikut tema)
-
-Dialog buat password, verifikasi, dan ganti password sebelumnya masih
-memakai jendela Tkinter bawaan yang polos (tidak ikut mode Light/Dark).
-Sekarang sudah diganti dengan dialog custom bergaya CustomTkinter yang
-konsisten dengan tampilan Light/Dark aplikasi.
-
-## Perbaikan Penting #4 (rapikan UI + fitur Tandai Folder)
-
-- Jendela utama diperlebar dan panel tombol aksi disusun ulang (bertumpuk
-  vertikal per kategori) supaya teks tombol seperti "Kunci & Sembunyikan"
-  tidak lagi terpotong di tampilan Dark mode.
-- Tombol gabungan "Buka Semua" diganti nama jadi **"Buka Kunci &
-  Tampilkan"** agar lebih jelas maksudnya (membuka kunci dan menampilkan
-  folder sekaligus dalam satu klik + satu password).
-- Fitur baru: **Tandai Folder** — pilih satu atau beberapa folder di
-  daftar, klik "🏷 Tandai Folder", lalu beri label bebas (misalnya
-  "Penting", "Kerja", "Pribadi"). Tanda ini muncul sebagai kolom
-  tersendiri di tabel dan murni untuk membantu Anda mengorganisir daftar
-  folder — tidak memengaruhi status sembunyi/kunci.
+- **Izin kunci diganti dari Full Control ke Modify** — versi awal memakai
+  `icacls ... /deny user:F` yang ikut memblokir hak mengubah izin folder
+  itu sendiri (self-lockout risk). Sekarang pakai `M` (Modify), yang
+  tetap memblokir akses isi folder tapi tidak memblokir hak membuka
+  kunci lagi.
+- **Urutan Sembunyikan sebelum Kunci** — pada aksi gabungan, folder
+  disembunyikan dulu baru dikunci (dan sebaliknya saat membuka), karena
+  izin kunci (Modify) turut memblokir hak "Write Attributes" yang
+  dibutuhkan untuk mengubah status sembunyi.
+- **Progress bar** — setiap aksi berjalan di background thread dengan
+  jendela progress bar, supaya UI tidak macet saat memproses folder
+  besar (operasi `icacls` rekursif bisa memakan waktu).
+- **Dialog password bertema** — dialog buat/verifikasi/ganti password
+  sudah pakai tampilan CustomTkinter, ikut mode Light/Dark, bukan lagi
+  jendela Tkinter polos.
+- **UI dirapikan** — jendela diperlebar, tombol aksi disusun bertumpuk
+  vertikal per kategori supaya tidak ada teks tombol yang terpotong.
+- **Seleksi via checkbox** — menggantikan seleksi Ctrl/Shift-klik baris.
+  Ada tombol Pilih Semua / Batal Pilih Semua.
 
 ## Dependensi
 
@@ -143,17 +87,17 @@ File hasilnya ada di `dist\Vaultix.exe`.
    **password master**.
 2. Klik **"+ Tambah Folder"** untuk mendaftarkan satu atau beberapa
    folder sekaligus ke daftar utama.
-3. Pilih satu/beberapa folder di daftar (Ctrl/Shift-klik untuk memilih
-   lebih dari satu), lalu pilih aksi yang diinginkan:
+3. **Centang** folder yang ingin diproses di kolom checkbox paling kiri
+   (atau klik **"Pilih Semua"** / **"Batal Pilih Semua"**), lalu pilih
+   aksi yang diinginkan:
    - **Sembunyikan / Tampilkan** — tanpa password.
    - **Kunci / Buka Kunci** — minta password master.
-   - **Kunci & Sembunyikan** / **Buka Kunci & Tampilkan** — gabungan keduanya.
-4. Klik **"🏷 Tandai Folder"** untuk memberi label bebas pada folder
-   terpilih (misalnya "Penting", "Kerja") agar mudah dikenali di daftar.
-5. Ganti tema Light/Dark/System dari dropdown di pojok kanan atas.
-6. **Riwayat Akses Folder** untuk melihat file/folder yang baru-baru ini
+   - **Kunci & Sembunyikan** / **Buka Kunci & Tampilkan** — gabungan
+     keduanya.
+4. Ganti tema Light/Dark/System dari dropdown di pojok kanan atas.
+5. **Riwayat Akses Folder** untuk melihat file/folder yang baru-baru ini
    dibuka di perangkat (berdasarkan data bawaan Windows).
-7. **Hapus dari Daftar** hanya bisa dilakukan untuk folder yang sudah
+6. **Hapus dari Daftar** hanya bisa dilakukan untuk folder yang sudah
    dalam kondisi terlihat & tidak terkunci (untuk mencegah folder
    terkunci "hilang jejak" dari daftar).
 
@@ -165,6 +109,11 @@ File hasilnya ada di `dist\Vaultix.exe`.
   Prompt (jalankan sebagai Administrator jika perlu):
   ```
   icacls "C:\path\folder" /remove:d %USERNAME%
+  ```
+  Kalau masih gagal juga, sebagai jalan terakhir:
+  ```
+  takeown /F "C:\path\folder" /R /D Y
+  icacls "C:\path\folder" /reset /T
   ```
 - Untuk membalik status **Sembunyikan** secara manual tanpa password:
   ```
