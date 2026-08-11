@@ -6,10 +6,10 @@ diulang-ulang kapan saja, tidak sekali pakai.
 
 ## Konsep Utama
 
-1. **Daftar Folder** — folder yang Anda tambahkan (bisa banyak sekaligus)
-   akan selalu ada di daftar ini, apa pun statusnya. Menambah folder ke
-   daftar TIDAK langsung menyembunyikan/mengunci apa pun — itu aksi
-   terpisah yang Anda pilih sendiri setelahnya.
+1. **Daftar Folder** — folder yang Anda tambahkan satu per satu lewat
+   "+ Tambah Folder" akan selalu ada di daftar ini, apa pun statusnya.
+   Menambah folder ke daftar TIDAK langsung menyembunyikan/mengunci apa
+   pun — itu aksi terpisah yang Anda pilih sendiri setelahnya.
 2. **Checkbox seleksi** — setiap baris punya kotak centang (☐/☑) di
    kolom paling kiri. Centang folder yang ingin dikenai aksi, atau pakai
    tombol **Pilih Semua** / **Batal Pilih Semua** di atas tabel.
@@ -53,6 +53,37 @@ Password disimpan sebagai hash (PBKDF2-HMAC-SHA256 + salt) di
   vertikal per kategori supaya tidak ada teks tombol yang terpotong.
 - **Seleksi via checkbox** — menggantikan seleksi Ctrl/Shift-klik baris.
   Ada tombol Pilih Semua / Batal Pilih Semua.
+- **Tambah folder kembali ke default satu per satu** — sempat ada dialog
+  staging & browser multi-folder custom, tapi atas permintaan dibalikkan
+  ke perilaku sederhana: klik "+ Tambah Folder" langsung membuka dialog
+  pilih folder bawaan Windows (satu folder per klik). Untuk menambahkan
+  beberapa folder, klik tombolnya berkali-kali.
+
+## Perbaikan Penting #6 (Riwayat Akses Folder jadi 2 mode)
+
+"Riwayat Akses Folder" sekarang punya 2 tab:
+
+**Tab 1 - Riwayat Ringan (Bawaan Windows)**
+Sama seperti sebelumnya: baca Recent Items & registry MRU. Tanpa admin,
+tanpa setup, tapi cakupannya terbatas dan tidak ada info user/proses.
+
+**Tab 2 - Riwayat Lengkap (Audit Log)**
+Menggunakan Windows Object Access Auditing (fitur keamanan bawaan
+Windows) + Security Event Log:
+- Mencatat SETIAP percobaan akses (baca/tulis/hapus, sukses/gagal) ke
+  folder yang auditnya diaktifkan - termasuk lewat Command
+  Prompt/PowerShell/aplikasi apa pun, bukan cuma Explorer.
+- Menampilkan waktu presisi, nama user Windows, nama proses, dan jenis
+  akses.
+- **Wajib dijalankan sebagai Administrator** (klik kanan → "Run as
+  administrator"), dan audit harus **diaktifkan manual per folder**
+  lewat tombol "Aktifkan Audit untuk Folder Tercentang" di tab ini
+  (pakai checkbox di daftar folder utama untuk memilih folder mana).
+- Bisa dinonaktifkan lagi lewat "Nonaktifkan Audit untuk Folder
+  Tercentang".
+- **Perhatian**: folder yang sering diakses akan menghasilkan banyak
+  entri log di Security Event Log Windows (bukan cuma di Vaultix) -
+  aktifkan hanya untuk folder yang benar-benar perlu dipantau ketat.
 
 ## Dependensi
 
@@ -85,8 +116,9 @@ File hasilnya ada di `dist\Vaultix.exe`.
 
 1. Jalankan aplikasi. Pertama kali dibuka, Anda diminta membuat
    **password master**.
-2. Klik **"+ Tambah Folder"** untuk mendaftarkan satu atau beberapa
-   folder sekaligus ke daftar utama.
+2. Klik **"+ Tambah Folder"** untuk membuka dialog pilih folder bawaan
+   Windows. Satu folder per klik — ulangi tombolnya untuk menambahkan
+   folder lain.
 3. **Centang** folder yang ingin diproses di kolom checkbox paling kiri
    (atau klik **"Pilih Semua"** / **"Batal Pilih Semua"**), lalu pilih
    aksi yang diinginkan:

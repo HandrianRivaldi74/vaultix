@@ -35,6 +35,7 @@ import threading
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
+import xml.etree.ElementTree as ET
 
 try:
     import winreg
@@ -255,6 +256,84 @@ def get_folder_access_history():
     items = get_recent_items() + get_recent_folders_registry()
     items.sort(key=lambda x: x["time"] or datetime.min, reverse=True)
     return items
+
+
+# ---------------------------------------------------------------------------
+# Riwayat Lengkap (Windows Object Access Auditing + Security Event Log)
+# ---------------------------------------------------------------------------
+#
+# Berbeda dari riwayat ringan di atas, mode ini benar-benar mencatat SETIAP
+# percobaan akses (baca/tulis/hapus, berhasil/ditolak) ke folder yang
+# diaudit - termasuk lewat Command Prompt/PowerShell/aplikasi apa pun.
+# Konsekuensinya: butuh hak Administrator, harus diaktifkan manual per
+# folder, dan bisa menghasilkan banyak entri log kalau folder sering
+# diakses.
+
+def is_admin() -> bool:
+    if not IS_WINDOWS:
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def enable_object_access_audit_policy():
+    """Aktifkan kategori audit 'File System' secara sistem (sekali saja,
+    berlaku untuk seluruh komputer). Butuh Administrator."""
+    result = subprocess.run(
+        ["auditpol", "/set", "/subcategory:File System", "/success:enable", "/failure:enable"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "auditpol gagal").strip())
+
+
+def set_folder_audit(path: str, enable: bool):
+    """Pasang/lepas SACL audit pada folder tertentu untuk grup Everyone,
+    mencatat baca/tulis/hapus, sukses maupun gagal."""
+    if enable:
+        args = ["icacls", path, "/setaudit", "Everyone:(OI)(CI)(S,F)(RD,WD,DE)"]
+    else:
+        args = ["icacls", path, "/removeaudit", "Everyone"]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or "icacls /setaudit gagal").strip())
+
+
+def get_audit_events(limit=300):
+    """Baca event Object Access (Event ID 4663) dari Security Event Log."""
+    if not IS_WINDOWS:
+        return []
+    cmd = [
+        "wevtutil", "qe", "Security",
+        "/q:*[System[(EventID=4663)]]",
+        "/f:RenderedXml", f"/c:{limit}", "/rd:true",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, errors="ignore")
+    if result.returncode != 0:
+        raise RuntimeError(
+            (result.stderr or result.stdout or "Gagal membaca Security Event Log").strip()
+            + "\n\nPastikan aplikasi dijalankan sebagai Administrator."
+        )
+
+    xml_text = "<Events>" + result.stdout.replace('<?xml version="1.0" encoding="UTF-8"?>', "") + "</Events>"
+    events = []
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return events
+
+    ns = {"e": "http://schemas.microsoft.com/win/2004/08/events/event"}
+    for ev in root.findall("e:Event", ns):
+        time_el = ev.find(".//e:TimeCreated", ns)
+        entry = {"time": time_el.get("SystemTime") if time_el is not None else "-"}
+        for d in ev.findall(".//e:EventData/e:Data", ns):
+            name = d.get("Name")
+            if name:
+                entry[name] = (d.text or "").strip()
+        events.append(entry)
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -606,68 +685,21 @@ class VaultixApp(ctk.CTk):
 
         progress.after(100, poll)
 
-    # -- tambah folder (bisa banyak sekaligus) --------------------------------
+    # -- tambah folder (satu per satu, default) --------------------------------
     def open_add_dialog(self):
+        folder = filedialog.askdirectory(title="Pilih folder yang ingin ditambahkan")
+        if not folder:
+            return
+        folder = os.path.normpath(folder)
+
         existing = {e["path"] for e in self.config_data.get("folders", [])}
+        if folder in existing:
+            messagebox.showwarning("Info", "Folder ini sudah ada di daftar.")
+            return
 
-        dialog = ctk.CTkToplevel(self)
-        dialog.title("Tambah Folder")
-        W, H = 480, 380
-        dialog.geometry(f"{W}x{H}")
-        center_window(dialog, W, H)
-        dialog.transient(self)
-        dialog.grab_set()
-
-        ctk.CTkLabel(
-            dialog,
-            text="Tambahkan satu atau beberapa folder ke daftar.\n"
-                 "Folder hanya akan didaftarkan dulu (belum disembunyikan\n"
-                 "atau dikunci) - pilih aksinya setelah muncul di daftar utama.",
-            justify="left",
-        ).pack(anchor="w", padx=15, pady=(15, 5))
-
-        list_container = ctk.CTkFrame(dialog, fg_color="transparent")
-        list_container.pack(fill="both", expand=True, padx=15)
-
-        staging = tk.Listbox(list_container, selectmode=tk.EXTENDED)
-        staging.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(list_container, orient="vertical", command=staging.yview)
-        sb.pack(side="right", fill="y")
-        staging.config(yscrollcommand=sb.set)
-
-        staged_paths = []
-
-        def add_folder():
-            folder = filedialog.askdirectory(title="Pilih folder (bisa dipanggil berkali-kali)", parent=dialog)
-            if not folder:
-                return
-            folder = os.path.normpath(folder)
-            if folder in existing or folder in staged_paths:
-                messagebox.showwarning("Info", "Folder ini sudah ada di daftar.", parent=dialog)
-                return
-            staged_paths.append(folder)
-            staging.insert(tk.END, folder)
-
-        def remove_staged():
-            for idx in reversed(list(staging.curselection())):
-                del staged_paths[idx]
-                staging.delete(idx)
-
-        def confirm_add():
-            if not staged_paths:
-                messagebox.showwarning("Info", "Belum ada folder yang ditambahkan.", parent=dialog)
-                return
-            for p in staged_paths:
-                self.config_data.setdefault("folders", []).append({"path": p, "hidden": False, "locked": False})
-            save_config(self.config_data)
-            self.refresh_list()
-            dialog.destroy()
-
-        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=15, pady=15)
-        ctk.CTkButton(btn_frame, text="+ Tambah Folder", command=add_folder).pack(side="left")
-        ctk.CTkButton(btn_frame, text="Hapus dari Daftar Ini", command=remove_staged).pack(side="left", padx=8)
-        ctk.CTkButton(btn_frame, text="Simpan ke Daftar Utama", command=confirm_add).pack(side="right")
+        self.config_data.setdefault("folders", []).append({"path": folder, "hidden": False, "locked": False})
+        save_config(self.config_data)
+        self.refresh_list()
 
     # -- aksi: sembunyikan / tampilkan (tanpa password) -----------------------
     def action_hide(self, hide: bool):
@@ -781,22 +813,32 @@ class VaultixApp(ctk.CTk):
     def show_access_history(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("Riwayat Akses Folder")
-        W, H = 760, 440
+        W, H = 820, 560
         dialog.geometry(f"{W}x{H}")
         center_window(dialog, W, H)
         dialog.transient(self)
 
+        tabs = ctk.CTkTabview(dialog, width=W - 30, height=H - 30)
+        tabs.pack(fill="both", expand=True, padx=10, pady=10)
+        tab_light = tabs.add("Riwayat Ringan (Bawaan Windows)")
+        tab_full = tabs.add("Riwayat Lengkap (Audit Log)")
+
+        self._build_light_history_tab(tab_light)
+        self._build_full_history_tab(tab_full)
+
+    def _build_light_history_tab(self, tab):
         ctk.CTkLabel(
-            dialog,
+            tab,
             text="Menampilkan folder/file yang baru-baru ini dibuka, berdasarkan data\n"
                  "yang sudah dicatat Windows sendiri (Recent Items & registry MRU).\n"
-                 "Tidak mencakup akses lewat Command Prompt/PowerShell atau aplikasi\n"
-                 "yang tidak memakai dialog Explorer standar.",
+                 "Ringan (tanpa admin, tanpa setup), tapi TIDAK mencakup akses lewat\n"
+                 "Command Prompt/PowerShell atau aplikasi non-Explorer, dan tidak\n"
+                 "mencatat siapa/proses apa yang mengakses.",
             justify="left",
-        ).pack(anchor="w", padx=15, pady=(15, 5))
+        ).pack(anchor="w", padx=10, pady=(10, 5))
 
         columns = ("time", "name", "path", "type", "source")
-        tree = ttk.Treeview(dialog, columns=columns, show="headings", height=13)
+        tree = ttk.Treeview(tab, columns=columns, show="headings", height=13)
         tree.heading("time", text="Waktu")
         tree.heading("name", text="Nama")
         tree.heading("path", text="Lokasi")
@@ -804,13 +846,13 @@ class VaultixApp(ctk.CTk):
         tree.heading("source", text="Sumber")
         tree.column("time", width=130)
         tree.column("name", width=140)
-        tree.column("path", width=260)
+        tree.column("path", width=250)
         tree.column("type", width=60, anchor="center")
         tree.column("source", width=140)
-        tree.pack(fill="both", expand=True, padx=15)
+        tree.pack(fill="both", expand=True, padx=10)
 
         status_var = tk.StringVar(value="")
-        ctk.CTkLabel(dialog, textvariable=status_var, text_color="#888888").pack(anchor="w", padx=15, pady=(6, 0))
+        ctk.CTkLabel(tab, textvariable=status_var, text_color="#888888").pack(anchor="w", padx=10, pady=(6, 0))
 
         def refresh():
             for row in tree.get_children():
@@ -833,8 +875,112 @@ class VaultixApp(ctk.CTk):
             if not items:
                 status_var.set((status_var.get() + " Belum ada riwayat yang ditemukan.").strip())
 
-        ctk.CTkButton(dialog, text="Refresh", command=refresh).pack(anchor="e", padx=15, pady=10)
+        ctk.CTkButton(tab, text="Refresh", command=refresh).pack(anchor="e", padx=10, pady=10)
         refresh()
+
+    def _build_full_history_tab(self, tab):
+        admin_ok = is_admin()
+        warn_text = (
+            "Mode ini mencatat SETIAP percobaan akses (baca/tulis/hapus, berhasil\n"
+            "atau ditolak) ke folder yang Anda aktifkan auditnya - termasuk lewat\n"
+            "Command Prompt/PowerShell/aplikasi apa pun. Butuh Administrator, harus\n"
+            "diaktifkan manual per folder, dan bisa menghasilkan banyak entri log\n"
+            "kalau folder sering diakses."
+        )
+        if not admin_ok:
+            warn_text += "\n\n⚠ Aplikasi TIDAK sedang berjalan sebagai Administrator - fitur di tab ini tidak akan berfungsi. Tutup aplikasi, klik kanan main.py/Vaultix.exe, pilih \"Run as administrator\"."
+
+        ctk.CTkLabel(tab, text=warn_text, justify="left", text_color=("#8a5b00" if admin_ok else "#c0392b")).pack(
+            anchor="w", padx=10, pady=(10, 5)
+        )
+
+        control_row = ctk.CTkFrame(tab, fg_color="transparent")
+        control_row.pack(fill="x", padx=10, pady=(0, 5))
+
+        def on_enable():
+            entries = self.get_selected_entries()
+            if not entries:
+                return
+            if not admin_ok:
+                messagebox.showerror("Butuh Administrator", "Jalankan Vaultix sebagai Administrator dulu.")
+                return
+            try:
+                enable_object_access_audit_policy()
+            except Exception as e:
+                messagebox.showerror("Gagal", f"Tidak bisa mengaktifkan kebijakan audit:\n{e}")
+                return
+            success, failed = [], []
+            for entry in entries:
+                try:
+                    set_folder_audit(entry["path"], True)
+                    success.append(entry["path"])
+                except Exception as e:
+                    failed.append((entry["path"], str(e)))
+            self.show_result_summary(success, failed, "berhasil diaktifkan auditnya", "diaktifkan")
+
+        def on_disable():
+            entries = self.get_selected_entries()
+            if not entries:
+                return
+            if not admin_ok:
+                messagebox.showerror("Butuh Administrator", "Jalankan Vaultix sebagai Administrator dulu.")
+                return
+            success, failed = [], []
+            for entry in entries:
+                try:
+                    set_folder_audit(entry["path"], False)
+                    success.append(entry["path"])
+                except Exception as e:
+                    failed.append((entry["path"], str(e)))
+            self.show_result_summary(success, failed, "berhasil dinonaktifkan auditnya", "dinonaktifkan")
+
+        ctk.CTkButton(control_row, text="Aktifkan Audit untuk Folder Tercentang", width=260, command=on_enable).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            control_row, text="Nonaktifkan Audit untuk Folder Tercentang", width=260,
+            fg_color="gray40", hover_color="gray30", command=on_disable,
+        ).pack(side="left")
+
+        columns = ("time", "user", "path", "access", "process", "result")
+        tree = ttk.Treeview(tab, columns=columns, show="headings", height=11)
+        headings = {
+            "time": "Waktu", "user": "User", "path": "Folder/File",
+            "access": "Jenis Akses", "process": "Proses", "result": "Hasil",
+        }
+        widths = {"time": 130, "user": 100, "path": 240, "access": 140, "process": 130, "result": 70}
+        for col in columns:
+            tree.heading(col, text=headings[col])
+            tree.column(col, width=widths[col], anchor="center" if col in ("result",) else "w")
+        tree.pack(fill="both", expand=True, padx=10, pady=(8, 0))
+
+        status_var = tk.StringVar(value="Klik \"Refresh Log Audit\" untuk memuat data (hanya menampilkan folder yang sudah diaktifkan auditnya).")
+        ctk.CTkLabel(tab, textvariable=status_var, text_color="#888888", wraplength=760, justify="left").pack(anchor="w", padx=10, pady=(6, 0))
+
+        def refresh_log():
+            for row in tree.get_children():
+                tree.delete(row)
+            if not admin_ok:
+                status_var.set("Butuh Administrator untuk membaca Security Event Log.")
+                return
+            try:
+                events = get_audit_events()
+            except Exception as e:
+                status_var.set(f"Gagal membaca log: {e}")
+                return
+            audited_paths = [e["path"] for e in self.config_data.get("folders", [])]
+            shown = 0
+            for ev in events:
+                obj_name = ev.get("ObjectName", "")
+                if audited_paths and not any(obj_name.lower().startswith(p.lower()) for p in audited_paths):
+                    continue
+                waktu = ev.get("time", "-")
+                user = ev.get("SubjectUserName", "-")
+                access = ev.get("AccessList", "-").strip().replace("\r\n", " ").replace("\t", " ")
+                process = ev.get("ProcessName", "-")
+                tree.insert("", tk.END, values=(waktu, user, obj_name, access, process, "Event"))
+                shown += 1
+            status_var.set(f"Menampilkan {shown} kejadian (dari folder yang sudah diaktifkan auditnya).")
+
+        ctk.CTkButton(tab, text="Refresh Log Audit", command=refresh_log).pack(anchor="e", padx=10, pady=10)
 
     # -- ganti password -----------------------------------------------------
     def change_password(self):
