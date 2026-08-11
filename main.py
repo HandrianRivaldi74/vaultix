@@ -94,6 +94,7 @@ def load_config():
         data["folders"] = migrated
     data.setdefault("folders", [])
     data.setdefault("theme", "System")
+    data.setdefault("activity_log", [])
     return data
 
 
@@ -101,6 +102,18 @@ def save_config(config):
     ensure_app_dir()
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+
+
+MAX_LOG_ENTRIES = 500
+
+
+def log_event(config, message: str):
+    """Catat satu kejadian ke Security Activity Log lalu simpan langsung."""
+    entry = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "event": message}
+    config.setdefault("activity_log", []).append(entry)
+    if len(config["activity_log"]) > MAX_LOG_ENTRIES:
+        config["activity_log"] = config["activity_log"][-MAX_LOG_ENTRIES:]
+    save_config(config)
 
 
 def hash_password(password: str, salt: bytes) -> str:
@@ -379,6 +392,7 @@ class VaultixApp(ctk.CTk):
         self.build_ui()
         self.apply_treeview_style()
         self.refresh_list()
+        log_event(self.config_data, "Aplikasi dibuka")
 
     # -- dialog password bertema (menggantikan simpledialog polos) ---------
     def ask_password_dialog(self, title, prompt, confirm=False):
@@ -457,6 +471,7 @@ class VaultixApp(ctk.CTk):
         if pw is None:
             sys.exit(0)
         set_master_password(self.config_data, pw)
+        log_event(self.config_data, "Password master dibuat")
         messagebox.showinfo("Sukses", "Password master berhasil dibuat.")
 
     # -- UI ---------------------------------------------------------------
@@ -517,6 +532,7 @@ class VaultixApp(ctk.CTk):
         ctk.CTkButton(manage_frame, text="+ Tambah Folder", width=140, command=self.open_add_dialog).pack(side="left", padx=(0, 8))
         ctk.CTkButton(manage_frame, text="Hapus dari Daftar", width=140, command=self.remove_selected, fg_color="#8a3b3b", hover_color="#6e2f2f").pack(side="left", padx=8)
         ctk.CTkButton(manage_frame, text="Riwayat Akses Folder", width=160, command=self.show_access_history).pack(side="left", padx=8)
+        ctk.CTkButton(manage_frame, text="🛡 Aktivitas Keamanan", width=160, command=self.show_security_activity).pack(side="left", padx=8)
         ctk.CTkButton(manage_frame, text="Ganti Password", width=140, command=self.change_password).pack(side="right")
 
         # -- tombol aksi --
@@ -613,6 +629,7 @@ class VaultixApp(ctk.CTk):
             return False
         if not verify_password(self.config_data, pw):
             messagebox.showerror("Error", "Password salah.")
+            log_event(self.config_data, "Percobaan password salah")
             return False
         return True
 
@@ -714,6 +731,7 @@ class VaultixApp(ctk.CTk):
         def worker(entry):
             set_folder_hidden(entry["path"], hide)
             entry["hidden"] = hide
+            log_event(self.config_data, f"Folder {'disembunyikan' if hide else 'ditampilkan'}: {entry['path']}")
 
         title = "Menyembunyikan Folder..." if hide else "Menampilkan Folder..."
         self.run_bulk_action(entries, worker, title, "berhasil diubah statusnya", "diubah")
@@ -737,6 +755,7 @@ class VaultixApp(ctk.CTk):
             else:
                 unlock_folder_access(entry["path"])
             entry["locked"] = lock
+            log_event(self.config_data, f"Folder {'dikunci' if lock else 'dibuka kuncinya'}: {entry['path']}")
 
         progress_title = "Mengunci Folder..." if lock else "Membuka Kunci Folder..."
         self.run_bulk_action(entries, worker, progress_title, "berhasil diubah status kuncinya", "diubah")
@@ -761,6 +780,7 @@ class VaultixApp(ctk.CTk):
             if not entry.get("locked"):
                 lock_folder_access(entry["path"])
                 entry["locked"] = True
+            log_event(self.config_data, f"Folder dikunci & disembunyikan: {entry['path']}")
 
         self.run_bulk_action(
             entries, worker, "Mengunci & Menyembunyikan...",
@@ -783,6 +803,7 @@ class VaultixApp(ctk.CTk):
             if entry.get("hidden"):
                 set_folder_hidden(entry["path"], False)
                 entry["hidden"] = False
+            log_event(self.config_data, f"Folder dibuka kunci & ditampilkan: {entry['path']}")
 
         self.run_bulk_action(
             entries, worker, "Membuka Semua...",
@@ -808,6 +829,53 @@ class VaultixApp(ctk.CTk):
         self.config_data["folders"] = [e for e in self.config_data["folders"] if e["path"] not in remove_paths]
         save_config(self.config_data)
         self.refresh_list()
+
+    # -- security activity log -------------------------------------------
+    def show_security_activity(self):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Aktivitas Keamanan")
+        W, H = 640, 480
+        dialog.geometry(f"{W}x{H}")
+        center_window(dialog, W, H)
+        dialog.transient(self)
+
+        ctk.CTkLabel(
+            dialog,
+            text="Catatan kejadian keamanan Vaultix: password diverifikasi/salah,\n"
+                 "folder dikunci/dibuka, dan aksi lainnya. Disimpan lokal di perangkat ini.",
+            justify="left",
+        ).pack(anchor="w", padx=15, pady=(15, 5))
+
+        columns = ("time", "event")
+        tree = ttk.Treeview(dialog, columns=columns, show="headings", height=16)
+        tree.heading("time", text="Waktu")
+        tree.heading("event", text="Kejadian")
+        tree.column("time", width=160)
+        tree.column("event", width=420)
+        tree.pack(fill="both", expand=True, padx=15)
+
+        def refresh():
+            for row in tree.get_children():
+                tree.delete(row)
+            entries = list(reversed(self.config_data.get("activity_log", [])))
+            for entry in entries:
+                tree.insert("", tk.END, values=(entry["time"], entry["event"]))
+
+        def clear_log():
+            if not messagebox.askyesno("Konfirmasi", "Hapus seluruh riwayat aktivitas keamanan?", parent=dialog):
+                return
+            self.config_data["activity_log"] = []
+            save_config(self.config_data)
+            refresh()
+
+        btn_row = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_row.pack(fill="x", padx=15, pady=10)
+        ctk.CTkButton(btn_row, text="Refresh", command=refresh).pack(side="right")
+        ctk.CTkButton(
+            btn_row, text="Bersihkan Log", fg_color="gray40", hover_color="gray30", command=clear_log,
+        ).pack(side="right", padx=8)
+
+        refresh()
 
     # -- riwayat akses folder -------------------------------------------
     def show_access_history(self):
@@ -992,6 +1060,7 @@ class VaultixApp(ctk.CTk):
         if pw is None:
             return
         set_master_password(self.config_data, pw)
+        log_event(self.config_data, "Password master diganti")
         messagebox.showinfo("Sukses", "Password master berhasil diganti.")
 
 

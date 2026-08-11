@@ -85,6 +85,44 @@ Windows) + Security Event Log:
   entri log di Security Event Log Windows (bukan cuma di Vaultix) -
   aktifkan hanya untuk folder yang benar-benar perlu dipantau ketat.
 
+## Roadmap Vaultix 1.2
+
+Fitur-fitur besar berikut sedang dikerjakan bertahap, dari yang paling
+mudah ke paling kompleks:
+
+1. ✅ **Security Activity Log** — selesai (lihat di bawah).
+2. ⬜ Dashboard Security Status
+3. ⬜ PIN sebagai alternatif password
+4. ⬜ Auto Lock berdasarkan aktivitas (idle, focus, lock/sleep/logout)
+5. ⬜ Multiple Vault (tiap vault: password/enkripsi/auto-lock/policy sendiri)
+6. ⬜ Windows Hello / Fingerprint / Face (lewat UserConsentVerifier)
+7. ⬜ Mode Encryption terpisah (AES-256-GCM + Argon2id + salt acak)
+8. ⬜ Screenshot/Recording Protection — **catatan penting**: hanya bisa
+   melindungi jendela Vaultix sendiri, TIDAK bisa mencegah screenshot
+   File Explorer asli. Baru berguna penuh kalau dipasangkan dengan file
+   browser custom di dalam aplikasi.
+9. ⬜ Decoy Vault — butuh Mode Encryption selesai dulu sebagai fondasi.
+10. ⬜ Security Key (FIDO2) — tahap lanjutan/eksperimental.
+11. ⬜ Mobile Remote Lock — **butuh infrastruktur terpisah** (backend
+    server, API, push notification, aplikasi mobile). Di luar cakupan
+    aplikasi desktop lokal ini.
+
+## Fitur Baru: Security Activity Log
+
+Tombol **"🛡 Aktivitas Keamanan"** menampilkan catatan kejadian
+keamanan, tersimpan lokal di `config.json` (maksimal 500 entri
+terakhir, entri lama otomatis dibuang). Kejadian yang dicatat saat ini:
+- Aplikasi dibuka
+- Password master dibuat / diganti / diverifikasi (gagal → "Percobaan
+  password salah")
+- Folder disembunyikan / ditampilkan
+- Folder dikunci / dibuka kuncinya
+- Aksi gabungan (kunci & sembunyikan / buka kunci & tampilkan)
+
+Bisa dibersihkan lewat tombol "Bersihkan Log" di jendela yang sama.
+Log ini akan jadi fondasi untuk fitur Auto Lock dan Dashboard di
+tahap berikutnya.
+
 ## Dependensi
 
 ```
