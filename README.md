@@ -94,7 +94,7 @@ mudah ke paling kompleks:
 2. ✅ **Dashboard Security Status** — selesai.
 3. ✅ **PIN sebagai alternatif password** — selesai (lihat di bawah).
 4. ✅ **Auto Lock berdasarkan aktivitas** — selesai (lihat di bawah).
-5. ⬜ Multiple Vault (tiap vault: password/enkripsi/auto-lock/policy sendiri)
+5. ✅ **Multiple Vault** — selesai (lihat di bawah).
 6. ⬜ Windows Hello / Fingerprint / Face (lewat UserConsentVerifier)
 7. ⬜ Mode Encryption terpisah (AES-256-GCM + Argon2id + salt acak)
 8. ⬜ Screenshot/Recording Protection — **catatan penting**: hanya bisa
@@ -229,6 +229,56 @@ gantinya:
 Setiap kali Auto Lock benar-benar mengunci folder, tercatat di Security
 Activity Log dengan alasan pemicunya (mis. "Vault otomatis dikunci
 (alasan: tidak ada aktivitas)").
+
+## Fitur Baru: Multiple Vault
+
+Restrukturisasi arsitektur besar: dari satu daftar folder & satu
+password, sekarang aplikasi mendukung **beberapa vault bernama**,
+masing-masing punya:
+- Password master & PIN sendiri
+- Daftar folder sendiri
+- Pengaturan Auto Lock sendiri (durasi & pemicu)
+- Placeholder pengaturan enkripsi (`encryption_enabled`) - baru aktif
+  setelah roadmap #7 (Mode Encryption) selesai
+
+**Migrasi otomatis**: kalau Anda upgrade dari versi sebelumnya,
+`config.json` lama otomatis dikonversi jadi satu vault bernama
+"Personal" berisi semua data lama (password, PIN, folder, auto-lock) -
+tidak ada data yang hilang, tidak perlu setup ulang.
+
+**Cara pakai:**
+- **Vault Aktif** di bagian atas sidebar — dropdown untuk berpindah
+  antar vault. Halaman Folders/Dashboard/Activity/Settings otomatis
+  menampilkan data vault yang sedang aktif.
+- **"+ Vault"** — buat vault baru dengan nama & password master sendiri.
+- **"Ganti Nama"** — ubah nama vault yang sedang aktif.
+- **"Hapus Vault Ini"** (di halaman Settings, butuh verifikasi password)
+  — melepas vault dari daftar Vaultix. Folder aslinya tidak dihapus,
+  hanya lepas dari pengelolaan aplikasi. Tidak bisa menghapus vault
+  terakhir (minimal harus ada 1).
+- **Auto Lock berjalan independen per vault** — bahkan vault yang
+  sedang tidak ditampilkan tetap dipantau sesuai pengaturannya sendiri
+  di latar belakang.
+- Security Activity Log tetap **global** (satu log untuk semua vault),
+  tapi setiap entri mencantumkan nama vault yang terlibat supaya tetap
+  jelas asalnya.
+
+### Perbaikan: satu folder tidak boleh ada di dua vault
+
+Karena kunci/sembunyikan bekerja di **level folder fisik** (atribut
+Windows + izin NTFS), folder yang sama tidak bisa "terkunci di satu
+vault tapi terbuka di vault lain" — keduanya akan selalu ikut-ikutan
+karena secara fisik itu folder yang sama di disk.
+
+- **"+ Tambah Folder"** sekarang mengecek ke SEMUA vault, bukan cuma
+  vault aktif — kalau folder sudah terdaftar di vault lain, muncul
+  peringatan dan folder tidak ditambahkan lagi.
+- Saat aplikasi dibuka, ada pengecekan otomatis untuk folder yang
+  sudah kadung terdaftar di lebih dari satu vault (dari sebelum
+  validasi ini ada) — kalau ditemukan, muncul peringatan berisi daftar
+  foldernya beserta vault mana saja yang memilikinya, supaya bisa
+  dibereskan manual (buka status foldernya, lalu hapus dari salah satu
+  vault).
 
 ## Dependensi
 

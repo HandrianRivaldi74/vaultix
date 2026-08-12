@@ -73,36 +73,75 @@ def ensure_app_dir():
     os.makedirs(APP_DIR, exist_ok=True)
 
 
+def new_vault_dict(name: str) -> dict:
+    return {
+        "name": name,
+        "salt": None, "password_hash": None, "password_strength": None,
+        "pin_enabled": False, "pin_hash": None, "pin_salt": None,
+        "folders": [],
+        "auto_lock_enabled": False, "auto_lock_minutes": 5,
+        "auto_lock_triggers": {"inactive": True, "lock": True, "focus_loss": False},
+        "encryption_enabled": False,  # placeholder - baru aktif setelah roadmap #7 (Mode Encryption) selesai
+    }
+
+
 def load_config():
     ensure_app_dir()
     if not os.path.exists(CONFIG_PATH):
-        return {"salt": None, "password_hash": None, "folders": [], "theme": "System"}
+        vault_id = secrets.token_hex(4)
+        return {
+            "theme": "System", "activity_log": [],
+            "vaults": {vault_id: new_vault_dict("Personal")},
+            "active_vault": vault_id,
+        }
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # Migrasi dari format lama (locked_folders) ke format baru (folders)
+    # Migrasi dari format lama (locked_folders) ke format single-vault "folders"
     if "folders" not in data and "locked_folders" in data:
         migrated = []
         for entry in data.get("locked_folders", []):
-            migrated.append(
-                {
-                    "path": entry["path"],
-                    "hidden": entry.get("locked", True),
-                    "locked": False,
-                }
-            )
+            migrated.append({"path": entry["path"], "hidden": entry.get("locked", True), "locked": False})
         data["folders"] = migrated
-    data.setdefault("folders", [])
+
+    # Migrasi dari format single-vault (versi sebelum Multiple Vault) ke struktur "vaults"
+    if "vaults" not in data:
+        vault_id = secrets.token_hex(4)
+        vault = new_vault_dict("Personal")
+        vault["salt"] = data.get("salt")
+        vault["password_hash"] = data.get("password_hash")
+        vault["password_strength"] = data.get("password_strength")
+        vault["pin_enabled"] = data.get("pin_enabled", False)
+        vault["pin_hash"] = data.get("pin_hash")
+        vault["pin_salt"] = data.get("pin_salt")
+        vault["folders"] = data.get("folders", [])
+        vault["auto_lock_enabled"] = data.get("auto_lock_enabled", False)
+        vault["auto_lock_minutes"] = data.get("auto_lock_minutes", 5)
+        vault["auto_lock_triggers"] = data.get(
+            "auto_lock_triggers", {"inactive": True, "lock": True, "focus_loss": False}
+        )
+        data = {
+            "theme": data.get("theme", "System"),
+            "activity_log": data.get("activity_log", []),
+            "vaults": {vault_id: vault},
+            "active_vault": vault_id,
+        }
+
     data.setdefault("theme", "System")
     data.setdefault("activity_log", [])
-    data.setdefault("pin_enabled", False)
-    data.setdefault("pin_hash", None)
-    data.setdefault("pin_salt", None)
-    data.setdefault("auto_lock_enabled", False)
-    data.setdefault("auto_lock_minutes", 5)
-    data.setdefault("auto_lock_triggers", {
-        "inactive": True, "lock": True, "focus_loss": False,
-    })
+    if not data.get("vaults"):
+        vault_id = secrets.token_hex(4)
+        data["vaults"] = {vault_id: new_vault_dict("Personal")}
+        data["active_vault"] = vault_id
+    if data.get("active_vault") not in data["vaults"]:
+        data["active_vault"] = next(iter(data["vaults"]))
+    for vault in data["vaults"].values():
+        vault.setdefault("folders", [])
+        vault.setdefault("pin_enabled", False)
+        vault.setdefault("auto_lock_enabled", False)
+        vault.setdefault("auto_lock_minutes", 5)
+        vault.setdefault("auto_lock_triggers", {"inactive": True, "lock": True, "focus_loss": False})
+        vault.setdefault("encryption_enabled", False)
     return data
 
 
@@ -144,41 +183,40 @@ def evaluate_password_strength(password: str) -> str:
     return "Lemah"
 
 
-def set_master_password(config, password: str):
+def set_master_password(vault: dict, password: str):
+    """Set password master UNTUK SATU VAULT. Tidak menyimpan ke disk -
+    pemanggil wajib memanggil save_config(config_data) setelahnya."""
     salt = secrets.token_bytes(16)
-    config["salt"] = salt.hex()
-    config["password_hash"] = hash_password(password, salt)
-    config["password_strength"] = evaluate_password_strength(password)
-    save_config(config)
+    vault["salt"] = salt.hex()
+    vault["password_hash"] = hash_password(password, salt)
+    vault["password_strength"] = evaluate_password_strength(password)
 
 
-def verify_password(config, password: str) -> bool:
-    if not config.get("salt") or not config.get("password_hash"):
+def verify_password(vault: dict, password: str) -> bool:
+    if not vault.get("salt") or not vault.get("password_hash"):
         return False
-    salt = bytes.fromhex(config["salt"])
-    return hash_password(password, salt) == config["password_hash"]
+    salt = bytes.fromhex(vault["salt"])
+    return hash_password(password, salt) == vault["password_hash"]
 
 
-def set_pin(config, pin: str):
+def set_pin(vault: dict, pin: str):
     salt = secrets.token_bytes(16)
-    config["pin_salt"] = salt.hex()
-    config["pin_hash"] = hash_password(pin, salt)
-    config["pin_enabled"] = True
-    save_config(config)
+    vault["pin_salt"] = salt.hex()
+    vault["pin_hash"] = hash_password(pin, salt)
+    vault["pin_enabled"] = True
 
 
-def verify_pin(config, pin: str) -> bool:
-    if not config.get("pin_enabled") or not config.get("pin_hash") or not config.get("pin_salt"):
+def verify_pin(vault: dict, pin: str) -> bool:
+    if not vault.get("pin_enabled") or not vault.get("pin_hash") or not vault.get("pin_salt"):
         return False
-    salt = bytes.fromhex(config["pin_salt"])
-    return hash_password(pin, salt) == config["pin_hash"]
+    salt = bytes.fromhex(vault["pin_salt"])
+    return hash_password(pin, salt) == vault["pin_hash"]
 
 
-def disable_pin(config):
-    config["pin_enabled"] = False
-    config["pin_hash"] = None
-    config["pin_salt"] = None
-    save_config(config)
+def disable_pin(vault: dict):
+    vault["pin_enabled"] = False
+    vault["pin_hash"] = None
+    vault["pin_salt"] = None
 
 
 # ---------------------------------------------------------------------------
@@ -484,18 +522,140 @@ class VaultixApp(ctk.CTk):
         self.minsize(WIDTH, HEIGHT)
         center_window(self, WIDTH, HEIGHT)
 
-        if not self.config_data.get("password_hash"):
+        if not self.get_active_vault().get("password_hash"):
             self.first_run_setup()
 
         self.build_ui()
         self.apply_treeview_style()
         self.refresh_list()
         log_event(self.config_data, "Aplikasi dibuka")
+        self.after(300, self._warn_duplicate_folders)
 
         # -- Auto Lock: mulai monitor idle, fokus, dan status lock (polling aman) --
         self.bind("<FocusOut>", self._on_focus_out)
         self._last_lock_state = False
         self._poll_idle()
+
+    # -- manajemen vault -----------------------------------------------------
+    def get_active_vault(self) -> dict:
+        return self.config_data["vaults"][self.config_data["active_vault"]]
+
+    def switch_vault(self, vault_id: str):
+        if vault_id == self.config_data.get("active_vault"):
+            return
+        self.config_data["active_vault"] = vault_id
+        save_config(self.config_data)
+        self.checked_paths = set()
+        log_event(self.config_data, f"Berpindah ke vault: {self.get_active_vault().get('name')}")
+        self._refresh_vault_switcher()
+        self.refresh_list()
+        if hasattr(self, "views"):
+            self._build_dashboard_view(self.views["dashboard"])
+            self._build_settings_view_refresh()
+
+    def open_create_vault_dialog(self):
+        box = ctk.CTkToplevel(self)
+        box.title("Vault Baru")
+        W, H = 380, 260
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.resizable(False, False)
+
+        ctk.CTkLabel(box, text="Nama vault baru:").pack(padx=20, pady=(20, 5), anchor="w")
+        name_entry = ctk.CTkEntry(box, width=320, placeholder_text="Contoh: Kerja, Pribadi, Proyek")
+        name_entry.pack(padx=20, pady=4)
+
+        error_var = tk.StringVar(value="")
+        ctk.CTkLabel(box, textvariable=error_var, text_color="#e05555", wraplength=340).pack(pady=(6, 0))
+
+        def create():
+            name = name_entry.get().strip()
+            if not name:
+                error_var.set("Nama vault tidak boleh kosong.")
+                return
+            vault_id = secrets.token_hex(4)
+            self.config_data["vaults"][vault_id] = new_vault_dict(name)
+            save_config(self.config_data)
+            box.destroy()
+            # minta password master untuk vault baru sebelum dipakai
+            pw = self.ask_password_dialog(
+                f"Buat Password untuk Vault '{name}'", "Buat password master untuk vault ini (minimal 4 karakter):",
+                confirm=True,
+            )
+            if pw:
+                set_master_password(self.config_data["vaults"][vault_id], pw)
+                save_config(self.config_data)
+            self.switch_vault(vault_id)
+
+        ctk.CTkButton(box, text="Buat Vault", command=create).pack(pady=15)
+
+    def open_rename_vault_dialog(self):
+        vault = self.get_active_vault()
+        box = ctk.CTkToplevel(self)
+        box.title("Ganti Nama Vault")
+        W, H = 380, 200
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.resizable(False, False)
+
+        ctk.CTkLabel(box, text="Nama vault:").pack(padx=20, pady=(20, 5), anchor="w")
+        name_entry = ctk.CTkEntry(box, width=320)
+        name_entry.insert(0, vault.get("name", ""))
+        name_entry.pack(padx=20, pady=4)
+
+        def save():
+            name = name_entry.get().strip()
+            if not name:
+                return
+            vault["name"] = name
+            save_config(self.config_data)
+            self._refresh_vault_switcher()
+            box.destroy()
+
+        ctk.CTkButton(box, text="Simpan", command=save).pack(pady=15)
+
+    def delete_active_vault(self):
+        if len(self.config_data["vaults"]) <= 1:
+            messagebox.showwarning("Info", "Tidak bisa menghapus vault terakhir - minimal harus ada 1 vault.")
+            return
+        vault = self.get_active_vault()
+        if not self.ask_master_password(f"Verifikasi Password Vault '{vault.get('name')}'"):
+            return
+        if not messagebox.askyesno(
+            "Konfirmasi", f"Hapus vault '{vault.get('name')}' dari daftar Vaultix?\n\n"
+            "Folder yang masih dalam status tersembunyi/terkunci di vault ini "
+            "TIDAK akan otomatis dibuka - pastikan sudah dibuka dulu sebelum menghapus vault.",
+        ):
+            return
+        vault_id = self.config_data["active_vault"]
+        vault_name = vault.get("name")
+        del self.config_data["vaults"][vault_id]
+        self.config_data["active_vault"] = next(iter(self.config_data["vaults"]))
+        save_config(self.config_data)
+        log_event(self.config_data, f"Vault dihapus dari daftar: {vault_name}")
+        self.switch_vault(self.config_data["active_vault"])
+
+    def _refresh_vault_switcher(self):
+        names = [v["name"] for v in self.config_data["vaults"].values()]
+        ids = list(self.config_data["vaults"].keys())
+        self._vault_id_by_name = dict(zip(names, ids))
+        self.vault_menu.configure(values=names)
+        active_name = self.get_active_vault().get("name")
+        self.vault_menu.set(active_name)
+
+    def _on_vault_menu_select(self, name):
+        vault_id = self._vault_id_by_name.get(name)
+        if vault_id:
+            self.switch_vault(vault_id)
+
+    def _build_settings_view_refresh(self):
+        for w in self.views["settings"].winfo_children():
+            w.destroy()
+        self._build_settings_view(self.views["settings"])
 
     # -- dialog password bertema (menggantikan simpledialog polos) ---------
     def ask_password_dialog(self, title, prompt, confirm=False):
@@ -573,7 +733,8 @@ class VaultixApp(ctk.CTk):
         )
         if pw is None:
             sys.exit(0)
-        set_master_password(self.config_data, pw)
+        set_master_password(self.get_active_vault(), pw)
+        save_config(self.config_data)
         log_event(self.config_data, "Password master dibuat")
         messagebox.showinfo("Sukses", "Password master berhasil dibuat.")
 
@@ -587,7 +748,16 @@ class VaultixApp(ctk.CTk):
         sidebar.grid(row=0, column=0, sticky="nsw")
         sidebar.grid_propagate(False)
 
-        ctk.CTkLabel(sidebar, text="🗄 Vaultix", font=ctk.CTkFont(size=20, weight="bold")).pack(padx=20, pady=(25, 20), anchor="w")
+        ctk.CTkLabel(sidebar, text="🗄 Vaultix", font=ctk.CTkFont(size=20, weight="bold")).pack(padx=20, pady=(25, 10), anchor="w")
+
+        ctk.CTkLabel(sidebar, text="Vault Aktif", text_color="#888888").pack(padx=20, anchor="w")
+        self.vault_menu = ctk.CTkOptionMenu(sidebar, values=[""], command=self._on_vault_menu_select, width=160)
+        self.vault_menu.pack(padx=15, pady=(2, 6))
+        vault_btn_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        vault_btn_row.pack(padx=15, pady=(0, 15))
+        ctk.CTkButton(vault_btn_row, text="+ Vault", width=76, height=26, command=self.open_create_vault_dialog).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(vault_btn_row, text="Ganti Nama", width=80, height=26, fg_color="gray40", hover_color="gray30", command=self.open_rename_vault_dialog).pack(side="left")
+        self._refresh_vault_switcher()
 
         self.nav_buttons = {}
         nav_items = [
@@ -714,7 +884,9 @@ class VaultixApp(ctk.CTk):
 
     # -- view: pengaturan -----------------------------------------------------
     def _build_settings_view(self, parent):
-        ctk.CTkLabel(parent, text="⚙ Settings", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=25, pady=(20, 15))
+        av = self.get_active_vault()
+        ctk.CTkLabel(parent, text="⚙ Settings", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=25, pady=(20, 0))
+        ctk.CTkLabel(parent, text=f"Vault aktif: {av.get('name')}", text_color="#888888").pack(anchor="w", padx=25, pady=(0, 15))
 
         def setting_row(title, desc, btn_text, command, danger=False):
             box = ctk.CTkFrame(parent)
@@ -758,22 +930,28 @@ class VaultixApp(ctk.CTk):
 
         btn_col = ctk.CTkFrame(inner, fg_color="transparent")
         btn_col.pack(side="right")
-        self.auto_lock_switch_var = tk.BooleanVar(value=self.config_data.get("auto_lock_enabled", False))
+        self.auto_lock_switch_var = tk.BooleanVar(value=self.get_active_vault().get("auto_lock_enabled", False))
         ctk.CTkSwitch(
             btn_col, text="", variable=self.auto_lock_switch_var, command=self._toggle_auto_lock, width=40,
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_col, text="Konfigurasi", width=110, command=self.open_auto_lock_settings).pack(side="left")
 
-    # -- auto lock ------------------------------------------------------------
-    def _trigger_auto_lock(self, reason: str):
-        if not self.config_data.get("auto_lock_enabled"):
+        setting_row(
+            "Hapus Vault Ini",
+            f"Hapus vault '{av.get('name')}' dari daftar Vaultix (folder aslinya tidak akan dihapus, "
+            "hanya dilepas dari pengelolaan aplikasi). Tidak bisa dilakukan kalau ini vault terakhir.",
+            "Hapus Vault", self.delete_active_vault, danger=True,
+        )
+
+    # -- auto lock (berjalan per-vault, setiap vault punya policy sendiri) ----
+    def _trigger_auto_lock_for_vault(self, vault: dict, reason: str):
+        if not vault.get("auto_lock_enabled"):
             return
-        triggers = self.config_data.get("auto_lock_triggers", {})
+        triggers = vault.get("auto_lock_triggers", {})
         if not triggers.get(reason, False):
             return
 
-        folders = self.config_data.get("folders", [])
-        unlocked = [e for e in folders if not e.get("locked")]
+        unlocked = [e for e in vault.get("folders", []) if not e.get("locked")]
         if not unlocked:
             return
 
@@ -792,25 +970,29 @@ class VaultixApp(ctk.CTk):
             "sleep": "komputer sleep", "logout": "user logout",
             "focus_loss": "aplikasi kehilangan fokus",
         }.get(reason, reason)
-        log_event(self.config_data, f"Vault otomatis dikunci (alasan: {reason_text})")
-        if hasattr(self, "tree"):
+        log_event(self.config_data, f"Vault '{vault.get('name')}' otomatis dikunci (alasan: {reason_text})")
+        if hasattr(self, "tree") and vault is self.get_active_vault():
             self.refresh_list()
 
     def _poll_idle(self):
         try:
-            if IS_WINDOWS and self.config_data.get("auto_lock_enabled"):
-                triggers = self.config_data.get("auto_lock_triggers", {})
+            if IS_WINDOWS:
+                locked_now = is_session_locked()
+                lock_just_happened = locked_now and not self._last_lock_state
+                self._last_lock_state = locked_now
 
-                if triggers.get("inactive"):
-                    threshold = self.config_data.get("auto_lock_minutes", 5) * 60
-                    if get_idle_seconds() >= threshold:
-                        self._trigger_auto_lock("inactive")
+                for vault in self.config_data.get("vaults", {}).values():
+                    if not vault.get("auto_lock_enabled"):
+                        continue
+                    triggers = vault.get("auto_lock_triggers", {})
 
-                if triggers.get("lock"):
-                    locked_now = is_session_locked()
-                    if locked_now and not self._last_lock_state:
-                        self._trigger_auto_lock("lock")
-                    self._last_lock_state = locked_now
+                    if triggers.get("inactive"):
+                        threshold = vault.get("auto_lock_minutes", 5) * 60
+                        if get_idle_seconds() >= threshold:
+                            self._trigger_auto_lock_for_vault(vault, "inactive")
+
+                    if triggers.get("lock") and lock_just_happened:
+                        self._trigger_auto_lock_for_vault(vault, "lock")
         except Exception:
             pass
         self.after(5000, self._poll_idle)  # cek tiap 5 detik, ringan (panggilan API biasa)
@@ -823,14 +1005,16 @@ class VaultixApp(ctk.CTk):
     def _check_focus_lost(self):
         try:
             if self.focus_get() is None:  # None berarti fokus benar-benar keluar dari aplikasi
-                self._trigger_auto_lock("focus_loss")
+                for vault in self.config_data.get("vaults", {}).values():
+                    self._trigger_auto_lock_for_vault(vault, "focus_loss")
         except Exception:
             pass
 
     def _update_auto_lock_desc(self):
-        enabled = self.config_data.get("auto_lock_enabled", False)
-        minutes = self.config_data.get("auto_lock_minutes", 5)
-        triggers = self.config_data.get("auto_lock_triggers", {})
+        vault = self.get_active_vault()
+        enabled = vault.get("auto_lock_enabled", False)
+        minutes = vault.get("auto_lock_minutes", 5)
+        triggers = vault.get("auto_lock_triggers", {})
         labels = {
             "inactive": "tidak aktif", "lock": "komputer dikunci", "sleep": "komputer sleep",
             "logout": "logout", "focus_loss": "aplikasi kehilangan fokus",
@@ -843,14 +1027,16 @@ class VaultixApp(ctk.CTk):
         self.auto_lock_desc_var.set(text)
 
     def _toggle_auto_lock(self):
-        self.config_data["auto_lock_enabled"] = self.auto_lock_switch_var.get()
+        vault = self.get_active_vault()
+        vault["auto_lock_enabled"] = self.auto_lock_switch_var.get()
         save_config(self.config_data)
-        log_event(self.config_data, f"Auto Lock {'diaktifkan' if self.config_data['auto_lock_enabled'] else 'dinonaktifkan'}")
+        log_event(self.config_data, f"Auto Lock vault '{vault.get('name')}' {'diaktifkan' if vault['auto_lock_enabled'] else 'dinonaktifkan'}")
         self._update_auto_lock_desc()
 
     def open_auto_lock_settings(self):
+        vault = self.get_active_vault()
         box = ctk.CTkToplevel(self)
-        box.title("Konfigurasi Auto Lock")
+        box.title(f"Konfigurasi Auto Lock — {vault.get('name')}")
         W, H = 440, 460
         box.geometry(f"{W}x{H}")
         center_window(box, W, H)
@@ -859,7 +1045,7 @@ class VaultixApp(ctk.CTk):
         box.resizable(False, False)
 
         ctk.CTkLabel(
-            box, text="Kunci & sembunyikan ulang otomatis semua folder yang sedang\nterbuka, kalau kondisi berikut terpenuhi:",
+            box, text="Kunci & sembunyikan ulang otomatis semua folder yang sedang\nterbuka di vault ini, kalau kondisi berikut terpenuhi:",
             wraplength=400, justify="left",
         ).pack(padx=20, pady=(20, 10), anchor="w")
 
@@ -867,11 +1053,11 @@ class VaultixApp(ctk.CTk):
         minutes_frame.pack(fill="x", padx=20, pady=(0, 10))
         ctk.CTkLabel(minutes_frame, text="Tidak ada aktivitas selama:").pack(side="left")
         minutes_entry = ctk.CTkEntry(minutes_frame, width=60)
-        minutes_entry.insert(0, str(self.config_data.get("auto_lock_minutes", 5)))
+        minutes_entry.insert(0, str(vault.get("auto_lock_minutes", 5)))
         minutes_entry.pack(side="left", padx=8)
         ctk.CTkLabel(minutes_frame, text="menit").pack(side="left")
 
-        triggers = self.config_data.get("auto_lock_triggers", {})
+        triggers = vault.get("auto_lock_triggers", {})
         trigger_vars = {}
         trigger_labels = [
             ("inactive", "Tidak ada aktivitas (idle) selama durasi di atas"),
@@ -901,12 +1087,12 @@ class VaultixApp(ctk.CTk):
             except ValueError:
                 messagebox.showerror("Error", "Durasi harus angka bulat minimal 1 menit.", parent=box)
                 return
-            self.config_data["auto_lock_minutes"] = minutes
-            updated_triggers = dict(self.config_data.get("auto_lock_triggers", {}))
+            vault["auto_lock_minutes"] = minutes
+            updated_triggers = dict(vault.get("auto_lock_triggers", {}))
             updated_triggers.update({k: v.get() for k, v in trigger_vars.items()})
-            self.config_data["auto_lock_triggers"] = updated_triggers
+            vault["auto_lock_triggers"] = updated_triggers
             save_config(self.config_data)
-            log_event(self.config_data, "Pengaturan Auto Lock diperbarui")
+            log_event(self.config_data, f"Pengaturan Auto Lock vault '{vault.get('name')}' diperbarui")
             self._update_auto_lock_desc()
             box.destroy()
 
@@ -935,7 +1121,7 @@ class VaultixApp(ctk.CTk):
     def refresh_list(self):
         for row in self.tree.get_children():
             self.tree.delete(row)
-        folders = self.config_data.get("folders", [])
+        folders = self.get_active_vault().get("folders", [])
         valid_paths = {e["path"] for e in folders}
         self.checked_paths &= valid_paths  # buang path yang sudah tidak ada di daftar
         for entry in folders:
@@ -958,7 +1144,7 @@ class VaultixApp(ctk.CTk):
         self.tree.set(row, "check", "☑" if row in self.checked_paths else "☐")
 
     def select_all(self):
-        self.checked_paths = {e["path"] for e in self.config_data.get("folders", [])}
+        self.checked_paths = {e["path"] for e in self.get_active_vault().get("folders", [])}
         self.refresh_list()
 
     def deselect_all(self):
@@ -969,19 +1155,20 @@ class VaultixApp(ctk.CTk):
         if not self.checked_paths:
             messagebox.showwarning("Info", "Centang satu atau beberapa folder di daftar terlebih dahulu.")
             return []
-        folders = self.config_data.get("folders", [])
+        folders = self.get_active_vault().get("folders", [])
         return [e for e in folders if e["path"] in self.checked_paths]
 
     def ask_master_password(self, title="Verifikasi Password") -> bool:
-        prompt = "Masukkan password master:"
-        if self.config_data.get("pin_enabled"):
+        vault = self.get_active_vault()
+        prompt = f"Masukkan password master vault '{vault.get('name')}':"
+        if vault.get("pin_enabled"):
             prompt += "\n(atau PIN Anda)"
         pw = self.ask_password_dialog(title, prompt)
         if pw is None:
             return False
-        if verify_password(self.config_data, pw):
+        if verify_password(vault, pw):
             return True
-        if self.config_data.get("pin_enabled") and verify_pin(self.config_data, pw):
+        if vault.get("pin_enabled") and verify_pin(vault, pw):
             log_event(self.config_data, "Verifikasi berhasil menggunakan PIN")
             return True
         messagebox.showerror("Error", "Password/PIN salah.")
@@ -1058,18 +1245,63 @@ class VaultixApp(ctk.CTk):
         progress.after(100, poll)
 
     # -- tambah folder (satu per satu, default) --------------------------------
+    def find_folder_in_other_vaults(self, path: str):
+        """Cek apakah `path` sudah terdaftar di vault MANA PUN (termasuk vault
+        aktif). Mengembalikan nama vault yang memilikinya, atau None kalau
+        belum terdaftar di mana pun. Perlu dicegah lintas-vault karena
+        kunci/sembunyikan bekerja di level folder fisik - kalau folder yang
+        sama ada di 2 vault, membuka salah satu otomatis membuka yang lain."""
+        for vault in self.config_data.get("vaults", {}).values():
+            if any(e["path"] == path for e in vault.get("folders", [])):
+                return vault.get("name")
+        return None
+
+    def _warn_duplicate_folders(self):
+        """Deteksi folder yang sudah kadung terdaftar di lebih dari satu
+        vault (dari sebelum validasi ini ada) dan beri tahu pengguna."""
+        seen = {}
+        for vault in self.config_data.get("vaults", {}).values():
+            for entry in vault.get("folders", []):
+                seen.setdefault(entry["path"], []).append(vault.get("name"))
+        duplicates = {path: names for path, names in seen.items() if len(names) > 1}
+        if not duplicates:
+            return
+        lines = [f"- {path} (di vault: {', '.join(names)})" for path, names in duplicates.items()]
+        messagebox.showwarning(
+            "Folder Terdaftar di Lebih dari Satu Vault",
+            "Ditemukan folder yang terdaftar di lebih dari satu vault (dari sebelum "
+            "validasi ini aktif). Status kunci/sembunyikan folder ini akan selalu "
+            "'ikut-ikutan' di semua vault yang memilikinya, karena secara fisik itu "
+            "folder yang sama.\n\n" + "\n".join(lines) +
+            "\n\nSarannya: buka status folder ini (buka kunci & tampilkan) lalu hapus "
+            "dari daftar salah satu vault, sisakan hanya di satu vault saja.",
+        )
+        log_event(self.config_data, f"Ditemukan {len(duplicates)} folder terdaftar di lebih dari satu vault")
+
     def open_add_dialog(self):
         folder = filedialog.askdirectory(title="Pilih folder yang ingin ditambahkan")
         if not folder:
             return
         folder = os.path.normpath(folder)
 
-        existing = {e["path"] for e in self.config_data.get("folders", [])}
-        if folder in existing:
-            messagebox.showwarning("Info", "Folder ini sudah ada di daftar.")
+        owner_vault_name = self.find_folder_in_other_vaults(folder)
+        if owner_vault_name:
+            active_name = self.get_active_vault().get("name")
+            if owner_vault_name == active_name:
+                messagebox.showwarning("Info", "Folder ini sudah ada di daftar vault ini.")
+            else:
+                messagebox.showwarning(
+                    "Info",
+                    f"Folder ini sudah terdaftar di vault '{owner_vault_name}'.\n\n"
+                    "Satu folder hanya boleh ada di satu vault - karena kunci/sembunyikan "
+                    "bekerja di level folder fisik, mendaftarkan folder yang sama di dua "
+                    "vault akan membuat status kuncinya selalu ikut-ikutan (buka di satu "
+                    "vault otomatis membuka juga di vault lain).",
+                )
             return
 
-        self.config_data.setdefault("folders", []).append({"path": folder, "hidden": False, "locked": False})
+        vault = self.get_active_vault()
+        vault.setdefault("folders", []).append({"path": folder, "hidden": False, "locked": False})
         save_config(self.config_data)
         self.refresh_list()
 
@@ -1181,7 +1413,8 @@ class VaultixApp(ctk.CTk):
         if not messagebox.askyesno("Konfirmasi", "Hapus folder terpilih dari daftar? (folder itu sendiri tidak akan dihapus)"):
             return
         remove_paths = {e["path"] for e in entries}
-        self.config_data["folders"] = [e for e in self.config_data["folders"] if e["path"] not in remove_paths]
+        vault = self.get_active_vault()
+        vault["folders"] = [e for e in vault["folders"] if e["path"] not in remove_paths]
         save_config(self.config_data)
         self.refresh_list()
 
@@ -1190,12 +1423,13 @@ class VaultixApp(ctk.CTk):
         for w in parent.winfo_children():
             w.destroy()
 
-        folders = self.config_data.get("folders", [])
+        av = self.get_active_vault()
+        folders = av.get("folders", [])
         total = len(folders)
         locked_count = sum(1 for f in folders if f.get("locked"))
         hidden_count = sum(1 for f in folders if f.get("hidden"))
 
-        pw_strength = self.config_data.get("password_strength", "Tidak diketahui")
+        pw_strength = av.get("password_strength", "Tidak diketahui")
         pw_color = {"Kuat": "green", "Sedang": "yellow"}.get(pw_strength, "red")
 
         score = 0
@@ -1222,7 +1456,7 @@ class VaultixApp(ctk.CTk):
 
         header = ctk.CTkFrame(parent, fg_color="transparent")
         header.pack(fill="x", padx=25, pady=(20, 10))
-        ctk.CTkLabel(header, text="SECURITY STATUS", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        ctk.CTkLabel(header, text=f"SECURITY STATUS — {av.get('name')}", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
         ctk.CTkButton(header, text="Refresh", width=90, command=lambda: self._build_dashboard_view(parent)).pack(side="right")
 
         status_box = ctk.CTkFrame(parent)
@@ -1236,8 +1470,8 @@ class VaultixApp(ctk.CTk):
             note="Bukan enkripsi sungguhan - lihat 'Mode Encryption (AES-256)' di roadmap #7, belum tersedia.",
         )
         status_row(inner, "Password", pw_strength, pw_color)
-        auto_lock_on = self.config_data.get("auto_lock_enabled", False)
-        auto_lock_minutes = self.config_data.get("auto_lock_minutes", 5)
+        auto_lock_on = av.get("auto_lock_enabled", False)
+        auto_lock_minutes = av.get("auto_lock_minutes", 5)
         status_row(
             inner, "Auto Lock",
             f"{auto_lock_minutes} menit" if auto_lock_on else "Nonaktif",
@@ -1466,7 +1700,7 @@ class VaultixApp(ctk.CTk):
             except Exception as e:
                 status_var.set(f"Gagal membaca log: {e}")
                 return
-            audited_paths = [e["path"] for e in self.config_data.get("folders", [])]
+            audited_paths = [e["path"] for e in self.get_active_vault().get("folders", [])]
             shown = 0
             for ev in events:
                 obj_name = ev.get("ObjectName", "")
@@ -1491,7 +1725,8 @@ class VaultixApp(ctk.CTk):
         )
         if pw is None:
             return
-        set_master_password(self.config_data, pw)
+        set_master_password(self.get_active_vault(), pw)
+        save_config(self.config_data)
         log_event(self.config_data, "Password master diganti")
         messagebox.showinfo("Sukses", "Password master berhasil diganti.")
 
@@ -1499,9 +1734,10 @@ class VaultixApp(ctk.CTk):
     def open_pin_settings(self):
         if not self.ask_master_password("Verifikasi Password Master"):
             return
+        vault = self.get_active_vault()
 
         box = ctk.CTkToplevel(self)
-        box.title("Atur PIN")
+        box.title(f"Atur PIN — {vault.get('name')}")
         W, H = 400, 300
         box.geometry(f"{W}x{H}")
         center_window(box, W, H)
@@ -1509,7 +1745,7 @@ class VaultixApp(ctk.CTk):
         box.grab_set()
         box.resizable(False, False)
 
-        status = "Aktif" if self.config_data.get("pin_enabled") else "Nonaktif"
+        status = "Aktif" if vault.get("pin_enabled") else "Nonaktif"
         ctk.CTkLabel(box, text=f"Status PIN saat ini: {status}", font=ctk.CTkFont(weight="bold")).pack(padx=20, pady=(20, 10))
         ctk.CTkLabel(
             box, text="PIN adalah alternatif password yang lebih pendek (4-8 digit\nangka) untuk verifikasi cepat kunci/buka kunci folder.",
@@ -1533,19 +1769,21 @@ class VaultixApp(ctk.CTk):
             if pin1 != pin2:
                 error_var.set("PIN tidak cocok, coba lagi.")
                 return
-            set_pin(self.config_data, pin1)
-            log_event(self.config_data, "PIN diaktifkan/diperbarui")
+            set_pin(vault, pin1)
+            save_config(self.config_data)
+            log_event(self.config_data, f"PIN vault '{vault.get('name')}' diaktifkan/diperbarui")
             messagebox.showinfo("Sukses", "PIN berhasil disimpan.", parent=box)
             box.destroy()
 
         def remove_pin():
-            if not self.config_data.get("pin_enabled"):
+            if not vault.get("pin_enabled"):
                 messagebox.showinfo("Info", "PIN memang belum aktif.", parent=box)
                 return
             if not messagebox.askyesno("Konfirmasi", "Nonaktifkan PIN? Anda hanya bisa memakai password master setelah ini.", parent=box):
                 return
-            disable_pin(self.config_data)
-            log_event(self.config_data, "PIN dinonaktifkan")
+            disable_pin(vault)
+            save_config(self.config_data)
+            log_event(self.config_data, f"PIN vault '{vault.get('name')}' dinonaktifkan")
             messagebox.showinfo("Sukses", "PIN dinonaktifkan.", parent=box)
             box.destroy()
 
