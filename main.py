@@ -98,6 +98,11 @@ def load_config():
     data.setdefault("pin_enabled", False)
     data.setdefault("pin_hash", None)
     data.setdefault("pin_salt", None)
+    data.setdefault("auto_lock_enabled", False)
+    data.setdefault("auto_lock_minutes", 5)
+    data.setdefault("auto_lock_triggers", {
+        "inactive": True, "lock": True, "focus_loss": False,
+    })
     return data
 
 
@@ -174,6 +179,58 @@ def disable_pin(config):
     config["pin_hash"] = None
     config["pin_salt"] = None
     save_config(config)
+
+
+# ---------------------------------------------------------------------------
+# Auto Lock: deteksi idle time (Windows API GetLastInputInfo)
+# ---------------------------------------------------------------------------
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+def get_idle_seconds() -> float:
+    if not IS_WINDOWS:
+        return 0.0
+    lii = _LASTINPUTINFO()
+    lii.cbSize = ctypes.sizeof(_LASTINPUTINFO)
+    if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii)):
+        return 0.0
+    millis = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
+    return millis / 1000.0
+
+
+def is_session_locked() -> bool:
+    """Deteksi 'komputer dikunci' dengan cara AMAN (polling biasa, tanpa
+    menyentuh message loop Windows): cek apakah jendela foreground saat
+    ini milik proses LogonUI.exe - itu proses yang menampilkan layar kunci
+    Windows. Tidak akurat 100% di semua skenario, tapi tidak berisiko
+    merusak memori seperti pendekatan WNDPROC subclassing sebelumnya."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        hproc = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not hproc:
+            return False
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            size = ctypes.c_ulong(260)
+            ok = ctypes.windll.kernel32.QueryFullProcessImageNameW(hproc, 0, buf, ctypes.byref(size))
+            if not ok:
+                return False
+            return os.path.basename(buf.value).lower() == "logonui.exe"
+        finally:
+            ctypes.windll.kernel32.CloseHandle(hproc)
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +492,11 @@ class VaultixApp(ctk.CTk):
         self.refresh_list()
         log_event(self.config_data, "Aplikasi dibuka")
 
+        # -- Auto Lock: mulai monitor idle, fokus, dan status lock (polling aman) --
+        self.bind("<FocusOut>", self._on_focus_out)
+        self._last_lock_state = False
+        self._poll_idle()
+
     # -- dialog password bertema (menggantikan simpledialog polos) ---------
     def ask_password_dialog(self, title, prompt, confirm=False):
         """Dialog input password ala CustomTkinter yang ikut tema Light/Dark.
@@ -678,6 +740,177 @@ class VaultixApp(ctk.CTk):
             "Riwayat Akses Folder", "Lihat folder/file yang baru-baru ini dibuka di perangkat ini (mode ringan & audit log lengkap).",
             "Buka", self.show_access_history,
         )
+
+        # -- Auto Lock (punya switch on/off, bukan cuma tombol) --
+        box = ctk.CTkFrame(parent)
+        box.pack(fill="x", padx=25, pady=6)
+        inner = ctk.CTkFrame(box, fg_color="transparent")
+        inner.pack(fill="x", padx=15, pady=12)
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(text_col, text="Auto Lock", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w")
+        self.auto_lock_desc_var = tk.StringVar()
+        ctk.CTkLabel(
+            text_col, textvariable=self.auto_lock_desc_var, text_color="#888888",
+            anchor="w", wraplength=440, justify="left",
+        ).pack(anchor="w")
+        self._update_auto_lock_desc()
+
+        btn_col = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_col.pack(side="right")
+        self.auto_lock_switch_var = tk.BooleanVar(value=self.config_data.get("auto_lock_enabled", False))
+        ctk.CTkSwitch(
+            btn_col, text="", variable=self.auto_lock_switch_var, command=self._toggle_auto_lock, width=40,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_col, text="Konfigurasi", width=110, command=self.open_auto_lock_settings).pack(side="left")
+
+    # -- auto lock ------------------------------------------------------------
+    def _trigger_auto_lock(self, reason: str):
+        if not self.config_data.get("auto_lock_enabled"):
+            return
+        triggers = self.config_data.get("auto_lock_triggers", {})
+        if not triggers.get(reason, False):
+            return
+
+        folders = self.config_data.get("folders", [])
+        unlocked = [e for e in folders if not e.get("locked")]
+        if not unlocked:
+            return
+
+        for entry in unlocked:
+            try:
+                if not entry.get("hidden"):
+                    set_folder_hidden(entry["path"], True)
+                    entry["hidden"] = True
+                lock_folder_access(entry["path"])
+                entry["locked"] = True
+            except Exception:
+                continue  # folder tertentu boleh gagal, lanjut ke folder lain
+
+        reason_text = {
+            "inactive": "tidak ada aktivitas", "lock": "komputer dikunci",
+            "sleep": "komputer sleep", "logout": "user logout",
+            "focus_loss": "aplikasi kehilangan fokus",
+        }.get(reason, reason)
+        log_event(self.config_data, f"Vault otomatis dikunci (alasan: {reason_text})")
+        if hasattr(self, "tree"):
+            self.refresh_list()
+
+    def _poll_idle(self):
+        try:
+            if IS_WINDOWS and self.config_data.get("auto_lock_enabled"):
+                triggers = self.config_data.get("auto_lock_triggers", {})
+
+                if triggers.get("inactive"):
+                    threshold = self.config_data.get("auto_lock_minutes", 5) * 60
+                    if get_idle_seconds() >= threshold:
+                        self._trigger_auto_lock("inactive")
+
+                if triggers.get("lock"):
+                    locked_now = is_session_locked()
+                    if locked_now and not self._last_lock_state:
+                        self._trigger_auto_lock("lock")
+                    self._last_lock_state = locked_now
+        except Exception:
+            pass
+        self.after(5000, self._poll_idle)  # cek tiap 5 detik, ringan (panggilan API biasa)
+
+    def _on_focus_out(self, event):
+        if event.widget != self:
+            return
+        self.after(150, self._check_focus_lost)
+
+    def _check_focus_lost(self):
+        try:
+            if self.focus_get() is None:  # None berarti fokus benar-benar keluar dari aplikasi
+                self._trigger_auto_lock("focus_loss")
+        except Exception:
+            pass
+
+    def _update_auto_lock_desc(self):
+        enabled = self.config_data.get("auto_lock_enabled", False)
+        minutes = self.config_data.get("auto_lock_minutes", 5)
+        triggers = self.config_data.get("auto_lock_triggers", {})
+        labels = {
+            "inactive": "tidak aktif", "lock": "komputer dikunci", "sleep": "komputer sleep",
+            "logout": "logout", "focus_loss": "aplikasi kehilangan fokus",
+        }
+        active = [labels[k] for k in labels if triggers.get(k)]
+        if enabled:
+            text = f"Aktif — {minutes} menit tidak aktif. Pemicu: {', '.join(active) if active else '(belum ada dipilih)'}"
+        else:
+            text = "Nonaktif — folder yang sedang terbuka tidak akan dikunci otomatis."
+        self.auto_lock_desc_var.set(text)
+
+    def _toggle_auto_lock(self):
+        self.config_data["auto_lock_enabled"] = self.auto_lock_switch_var.get()
+        save_config(self.config_data)
+        log_event(self.config_data, f"Auto Lock {'diaktifkan' if self.config_data['auto_lock_enabled'] else 'dinonaktifkan'}")
+        self._update_auto_lock_desc()
+
+    def open_auto_lock_settings(self):
+        box = ctk.CTkToplevel(self)
+        box.title("Konfigurasi Auto Lock")
+        W, H = 440, 460
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.resizable(False, False)
+
+        ctk.CTkLabel(
+            box, text="Kunci & sembunyikan ulang otomatis semua folder yang sedang\nterbuka, kalau kondisi berikut terpenuhi:",
+            wraplength=400, justify="left",
+        ).pack(padx=20, pady=(20, 10), anchor="w")
+
+        minutes_frame = ctk.CTkFrame(box, fg_color="transparent")
+        minutes_frame.pack(fill="x", padx=20, pady=(0, 10))
+        ctk.CTkLabel(minutes_frame, text="Tidak ada aktivitas selama:").pack(side="left")
+        minutes_entry = ctk.CTkEntry(minutes_frame, width=60)
+        minutes_entry.insert(0, str(self.config_data.get("auto_lock_minutes", 5)))
+        minutes_entry.pack(side="left", padx=8)
+        ctk.CTkLabel(minutes_frame, text="menit").pack(side="left")
+
+        triggers = self.config_data.get("auto_lock_triggers", {})
+        trigger_vars = {}
+        trigger_labels = [
+            ("inactive", "Tidak ada aktivitas (idle) selama durasi di atas"),
+            ("lock", "Komputer dikunci (Windows Lock)"),
+            ("focus_loss", "Aplikasi Vaultix kehilangan fokus"),
+        ]
+        for key, label in trigger_labels:
+            var = tk.BooleanVar(value=triggers.get(key, False))
+            trigger_vars[key] = var
+            ctk.CTkCheckBox(box, text=label, variable=var).pack(anchor="w", padx=20, pady=4)
+
+        ctk.CTkLabel(
+            box,
+            text="Catatan: \"Komputer dikunci\" dideteksi lewat polling ringan "
+                 "(cek jendela lock-screen tiap 5 detik) - aman, tidak menyentuh "
+                 "message loop Windows. \"Sleep\" dan \"User logout\" belum "
+                 "tersedia: cara deteksi paling aman untuk keduanya butuh integrasi "
+                 "lebih dalam yang belum siap kami pasang tanpa risiko crash.",
+            text_color="#888888", wraplength=400, justify="left",
+        ).pack(anchor="w", padx=20, pady=(10, 0))
+
+        def save():
+            try:
+                minutes = int(minutes_entry.get())
+                if minutes < 1:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Error", "Durasi harus angka bulat minimal 1 menit.", parent=box)
+                return
+            self.config_data["auto_lock_minutes"] = minutes
+            updated_triggers = dict(self.config_data.get("auto_lock_triggers", {}))
+            updated_triggers.update({k: v.get() for k, v in trigger_vars.items()})
+            self.config_data["auto_lock_triggers"] = updated_triggers
+            save_config(self.config_data)
+            log_event(self.config_data, "Pengaturan Auto Lock diperbarui")
+            self._update_auto_lock_desc()
+            box.destroy()
+
+        ctk.CTkButton(box, text="Simpan", command=save).pack(pady=15)
 
     # -- theme --------------------------------------------------------------
     def on_theme_change(self, value):
@@ -1003,9 +1236,12 @@ class VaultixApp(ctk.CTk):
             note="Bukan enkripsi sungguhan - lihat 'Mode Encryption (AES-256)' di roadmap #7, belum tersedia.",
         )
         status_row(inner, "Password", pw_strength, pw_color)
+        auto_lock_on = self.config_data.get("auto_lock_enabled", False)
+        auto_lock_minutes = self.config_data.get("auto_lock_minutes", 5)
         status_row(
-            inner, "Auto Lock", "Nonaktif", "red",
-            note="Fitur kunci otomatis berdasarkan aktivitas ada di roadmap #4, belum tersedia.",
+            inner, "Auto Lock",
+            f"{auto_lock_minutes} menit" if auto_lock_on else "Nonaktif",
+            "green" if auto_lock_on else "red",
         )
         status_row(
             inner, "Clipboard Protection", "Belum direncanakan", "red",

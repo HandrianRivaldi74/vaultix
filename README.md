@@ -93,7 +93,7 @@ mudah ke paling kompleks:
 1. ✅ **Security Activity Log** — selesai.
 2. ✅ **Dashboard Security Status** — selesai.
 3. ✅ **PIN sebagai alternatif password** — selesai (lihat di bawah).
-4. ⬜ Auto Lock berdasarkan aktivitas (idle, focus, lock/sleep/logout)
+4. ✅ **Auto Lock berdasarkan aktivitas** — selesai (lihat di bawah).
 5. ⬜ Multiple Vault (tiap vault: password/enkripsi/auto-lock/policy sendiri)
 6. ⬜ Windows Hello / Fingerprint / Face (lewat UserConsentVerifier)
 7. ⬜ Mode Encryption terpisah (AES-256-GCM + Argon2id + salt acak)
@@ -185,6 +185,50 @@ modern), dengan 4 halaman:
 Pemilihan tema Light/Dark/System dipindah ke bagian bawah sidebar (tetap
 selalu terlihat di halaman mana pun). Jendela diperlebar untuk
 menampung sidebar.
+
+## Fitur Baru: Auto Lock
+
+Kartu **"Auto Lock"** di halaman Settings, dengan switch on/off dan
+tombol "Konfigurasi" untuk mengatur durasi & pemicu. Saat aktif dan
+kondisi terpenuhi, **semua folder yang sedang terbuka** otomatis
+dikunci & disembunyikan lagi (tanpa perlu password, karena ini aksi
+otomatis tanpa kehadiran user) — persis seperti aksi "Kunci &
+Sembunyikan" tapi berjalan sendiri.
+
+Tiga pemicu yang bisa dicentang (bisa lebih dari satu sekaligus):
+
+| Pemicu | Cara deteksi |
+|---|---|
+| Tidak ada aktivitas (idle) | Windows API `GetLastInputInfo`, dicek tiap 5 detik |
+| Aplikasi kehilangan fokus | Event `<FocusOut>` Tkinter + pengecekan fokus aplikasi |
+| Komputer dikunci (Windows Lock) | Polling ringan tiap 5 detik: cek apakah jendela lock-screen (`LogonUI.exe`) sedang di depan |
+
+**"Sleep/hibernate" dan "User logout" belum tersedia** — lihat catatan
+hotfix di bawah.
+
+### ⚠ Hotfix: WNDPROC subclassing dicabut (berisiko crash)
+
+Versi awal fitur ini memakai teknik **WNDPROC subclassing** (membajak
+pesan Windows `WM_WTSSESSION_CHANGE`/`WM_POWERBROADCAST`/
+`WM_QUERYENDSESSION`) untuk mendeteksi lock/sleep/logout. Ternyata ada
+bug: nilai kembalian `SetWindowLongPtrW` (sebuah pointer 64-bit) tidak
+diberi tipe data yang benar di `ctypes`, sehingga pointer-nya terpotong
+dan menyebabkan **access violation** yang membanjiri konsol setiap kali
+ada pesan Windows masuk ke jendela aplikasi.
+
+Karena ini menyentuh manajemen memori tingkat rendah dan sudah terbukti
+berisiko, teknik itu **dicabut total**, bukan ditambal. Sebagai
+gantinya:
+- **"Komputer dikunci"** sekarang dideteksi lewat **polling biasa**
+  (memeriksa proses jendela foreground tiap 5 detik) — jauh lebih aman
+  karena tidak menyentuh message loop Windows sama sekali.
+- **"Sleep"** dan **"User logout"** untuk sementara **dihapus dari
+  pilihan** sampai ada cara deteksi yang sama amannya dengan cara di
+  atas.
+
+Setiap kali Auto Lock benar-benar mengunci folder, tercatat di Security
+Activity Log dengan alasan pemicunya (mis. "Vault otomatis dikunci
+(alasan: tidak ada aktivitas)").
 
 ## Dependensi
 
