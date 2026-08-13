@@ -95,7 +95,8 @@ mudah ke paling kompleks:
 3. ✅ **PIN sebagai alternatif password** — selesai (lihat di bawah).
 4. ✅ **Auto Lock berdasarkan aktivitas** — selesai (lihat di bawah).
 5. ✅ **Multiple Vault** — selesai (lihat di bawah).
-6. ⬜ Windows Hello / Fingerprint / Face (lewat UserConsentVerifier)
+6. ⏸ **Windows Hello / Fingerprint / Face** — DITUNDA, dinonaktifkan
+   sementara. Lihat penjelasan lengkap di bawah.
 7. ⬜ Mode Encryption terpisah (AES-256-GCM + Argon2id + salt acak)
 8. ⬜ Screenshot/Recording Protection — **catatan penting**: hanya bisa
    melindungi jendela Vaultix sendiri, TIDAK bisa mencegah screenshot
@@ -280,6 +281,36 @@ karena secara fisik itu folder yang sama di disk.
   dibereskan manual (buka status foldernya, lalu hapus dari salah satu
   vault).
 
+## Windows Hello / Fingerprint / Face — DITUNDA (dinonaktifkan sementara)
+
+Sempat dicoba diimplementasikan pakai `UserConsentVerifier` (API
+Windows yang otomatis memunculkan PIN Hello/sidik jari/wajah, mana saja
+yang sudah terdaftar user). Setelah diuji langsung, ternyata API polos
+ini **tidak berfungsi untuk aplikasi desktop klasik** seperti Vaultix
+(Python + Tkinter) — selalu gagal dengan error `[WinError -2147019873]
+The group or resource is not in the correct state`, bahkan setelah COM
+diinisialisasi STA dengan benar.
+
+**Penyebab sebenarnya**: `UserConsentVerifier.RequestVerificationAsync`
+versi polos dirancang untuk aplikasi UWP yang punya asosiasi jendela
+resmi di Windows Runtime. Aplikasi desktop klasik butuh memakai
+interface interop khusus (`IUserConsentVerifierInterop`) yang mengirim
+HWND jendela secara eksplisit — ini butuh manipulasi COM/WinRT tingkat
+rendah lewat `ctypes` (vtable manual, GUID interface, dsb), jenis kode
+yang risikonya setara dengan insiden WNDPROC subclassing yang pernah
+menyebabkan crash di fitur Auto Lock.
+
+**Keputusan**: daripada memasang perbaikan berisiko tanpa pengetesan
+matang, fitur ini **dimatikan total** lewat flag
+`WINDOWS_HELLO_FEATURE_ENABLED = False` di kode. Switch di halaman
+Settings tetap terlihat (supaya jelas fiturnya "belum siap", bukan
+hilang tanpa penjelasan) tapi selalu nonaktif/abu-abu. Password dan PIN
+tetap menjadi metode verifikasi utama dan berfungsi normal.
+
+Kalau di masa depan ada implementasi interop HWND-aware yang sudah
+diuji aman, fitur ini bisa diaktifkan kembali cukup dengan mengubah
+flag tersebut jadi `True` plus kode interop yang benar.
+
 ## Dependensi
 
 ```
@@ -289,6 +320,9 @@ pip install customtkinter pywin32
 - `customtkinter` **wajib** — dipakai untuk seluruh tampilan aplikasi.
 - `pywin32` opsional, hanya dipakai fitur "Riwayat Akses Folder" bagian
   Recent Items. Tanpa ini aplikasi tetap jalan normal.
+- `winsdk` **tidak diperlukan lagi untuk saat ini** — fitur Windows
+  Hello yang memakainya sedang dinonaktifkan (lihat bagian di atas).
+  Boleh tetap diinstall kalau sudah terlanjur, tidak masalah.
 
 ## Menjalankan
 

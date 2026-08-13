@@ -25,6 +25,7 @@ import ctypes
 import glob
 import hashlib
 import json
+import asyncio
 import os
 import queue
 import re
@@ -64,6 +65,23 @@ FILE_ATTRIBUTE_NORMAL = 0x80
 IS_WINDOWS = sys.platform.startswith("win")
 CURRENT_USER = os.environ.get("USERNAME", "")
 
+COINIT_APARTMENTTHREADED = 0x2
+
+
+def init_com_sta():
+    """Inisialisasi COM sebagai STA (Single-Threaded Apartment) sekali di
+    awal aplikasi. Beberapa API butuh ini terpasang lebih dulu sebelum
+    dipanggil dari thread manapun, termasuk Windows Hello (UserConsentVerifier)
+    yang menampilkan UI native - tanpa ini akan gagal dengan error semacam
+    'The group or resource is not in the correct state'. Aman dipanggil
+    berkali-kali (kalau sudah terinisialisasi, cukup diabaikan)."""
+    if not IS_WINDOWS:
+        return
+    try:
+        ctypes.windll.ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Penyimpanan konfigurasi
@@ -78,6 +96,7 @@ def new_vault_dict(name: str) -> dict:
         "name": name,
         "salt": None, "password_hash": None, "password_strength": None,
         "pin_enabled": False, "pin_hash": None, "pin_salt": None,
+        "windows_hello_enabled": False,
         "folders": [],
         "auto_lock_enabled": False, "auto_lock_minutes": 5,
         "auto_lock_triggers": {"inactive": True, "lock": True, "focus_loss": False},
@@ -138,6 +157,7 @@ def load_config():
     for vault in data["vaults"].values():
         vault.setdefault("folders", [])
         vault.setdefault("pin_enabled", False)
+        vault.setdefault("windows_hello_enabled", False)
         vault.setdefault("auto_lock_enabled", False)
         vault.setdefault("auto_lock_minutes", 5)
         vault.setdefault("auto_lock_triggers", {"inactive": True, "lock": True, "focus_loss": False})
@@ -269,6 +289,94 @@ def is_session_locked() -> bool:
             ctypes.windll.kernel32.CloseHandle(hproc)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Windows Hello (PIN Hello / Fingerprint / Face) via UserConsentVerifier
+# ---------------------------------------------------------------------------
+#
+# STATUS: DINONAKTIFKAN SEMENTARA (belum siap).
+#
+# Windows menyediakan satu API abstrak (UserConsentVerifier) yang otomatis
+# memunculkan metode verifikasi yang sudah didaftarkan user di perangkatnya
+# sendiri (PIN Hello, sidik jari, atau wajah). Tapi API polos yang dipakai
+# `winsdk` (RequestVerificationAsync tanpa HWND) ternyata dirancang untuk
+# aplikasi UWP, bukan aplikasi desktop klasik seperti Vaultix - selalu
+# gagal dengan error "The group or resource is not in the correct state"
+# di aplikasi non-UWP, bahkan setelah COM diinisialisasi STA dengan benar.
+#
+# Perbaikan yang benar butuh interop tingkat rendah (IUserConsentVerifierInterop
+# dengan HWND eksplisit) yang berisiko sama seperti insiden WNDPROC
+# sebelumnya. Untuk sekarang, fitur ini DIMATIKAN TOTAL lewat flag di bawah
+# supaya tidak ada percobaan verifikasi yang pasti gagal - password dan PIN
+# tetap jadi metode verifikasi utama. Set True lagi kalau di masa depan ada
+# implementasi interop yang sudah teruji aman.
+
+WINDOWS_HELLO_FEATURE_ENABLED = False
+
+
+def windows_hello_available() -> bool:
+    if not WINDOWS_HELLO_FEATURE_ENABLED:
+        return False
+    if not IS_WINDOWS:
+        return False
+    try:
+        from winsdk.windows.security.credentials.ui import (
+            UserConsentVerifier, UserConsentVerifierAvailability,
+        )
+
+        async def _check():
+            return await UserConsentVerifier.check_availability_async()
+
+        result = asyncio.run(_check())
+        return result == UserConsentVerifierAvailability.AVAILABLE
+    except Exception:
+        return False
+
+
+def request_windows_hello_verification(message: str):
+    """Tampilkan prompt Windows Hello (native, dikelola penuh oleh Windows).
+    Blocking sampai user selesai verifikasi atau membatalkan.
+    Mengembalikan tuple (berhasil: bool, keterangan: str) - keterangan
+    berisi alasan spesifik kalau gagal, supaya bisa didiagnosis."""
+    if not IS_WINDOWS:
+        return False, "Fitur ini hanya tersedia di Windows."
+    try:
+        from winsdk.windows.security.credentials.ui import (
+            UserConsentVerifier, UserConsentVerificationResult,
+        )
+
+        async def _verify():
+            return await UserConsentVerifier.request_verification_async(message)
+
+        result = asyncio.run(_verify())
+        mapping = {
+            UserConsentVerificationResult.VERIFIED: (True, "Berhasil diverifikasi."),
+            UserConsentVerificationResult.DEVICE_NOT_PRESENT: (
+                False, "Perangkat verifikasi (sensor sidik jari/kamera) tidak terdeteksi di komputer ini."
+            ),
+            UserConsentVerificationResult.NOT_CONFIGURED_FOR_USER: (
+                False, "Windows Hello belum diatur untuk akun Windows ini. "
+                       "Atur dulu lewat Settings > Accounts > Sign-in options."
+            ),
+            UserConsentVerificationResult.DISABLED_BY_POLICY: (
+                False, "Windows Hello dinonaktifkan oleh kebijakan sistem/organisasi di komputer ini."
+            ),
+            UserConsentVerificationResult.DEVICE_BUSY: (
+                False, "Perangkat verifikasi sedang sibuk/dipakai proses lain, coba lagi sesaat lagi."
+            ),
+            UserConsentVerificationResult.RETRIES_EXHAUSTED: (
+                False, "Terlalu banyak percobaan gagal berturut-turut, coba lagi beberapa saat lagi."
+            ),
+            UserConsentVerificationResult.CANCELED: (False, "Verifikasi dibatalkan oleh pengguna."),
+        }
+        if result in mapping:
+            return mapping[result]
+        return False, f"Gagal dengan kode hasil: {result}"
+    except ImportError:
+        return False, "Package 'winsdk' belum terinstall. Jalankan: pip install winsdk"
+    except Exception as e:
+        return False, f"Terjadi error teknis saat memanggil Windows Hello: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +622,7 @@ class VaultixApp(ctk.CTk):
         self.title("Vaultix")
         self.config_data = load_config()
         self.checked_paths = set()
+        self._hello_available = None
 
         ctk.set_appearance_mode(self.config_data.get("theme", "System"))
 
@@ -539,6 +648,20 @@ class VaultixApp(ctk.CTk):
     # -- manajemen vault -----------------------------------------------------
     def get_active_vault(self) -> dict:
         return self.config_data["vaults"][self.config_data["active_vault"]]
+
+    def hello_available(self) -> bool:
+        if self._hello_available is None:
+            self._hello_available = windows_hello_available()
+        return self._hello_available
+
+    def _toggle_windows_hello(self):
+        vault = self.get_active_vault()
+        vault["windows_hello_enabled"] = self.hello_switch_var.get()
+        save_config(self.config_data)
+        log_event(
+            self.config_data,
+            f"Windows Hello vault '{vault.get('name')}' {'diaktifkan' if vault['windows_hello_enabled'] else 'dinonaktifkan'}",
+        )
 
     def switch_vault(self, vault_id: str):
         if vault_id == self.config_data.get("active_vault"):
@@ -908,6 +1031,29 @@ class VaultixApp(ctk.CTk):
             "PIN", "Atur PIN 4-8 digit sebagai alternatif password master untuk verifikasi cepat.",
             "Atur PIN", self.open_pin_settings,
         )
+
+        # -- Windows Hello: DINONAKTIFKAN SEMENTARA, lihat catatan di kode --
+        box = ctk.CTkFrame(parent)
+        box.pack(fill="x", padx=25, pady=6)
+        inner = ctk.CTkFrame(box, fg_color="transparent")
+        inner.pack(fill="x", padx=15, pady=12)
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(
+            text_col, text="Windows Hello (PIN Hello / Fingerprint / Face) — Belum Siap",
+            font=ctk.CTkFont(size=13, weight="bold"), anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            text_col,
+            text="Sementara dinonaktifkan: API Windows Hello yang tersedia untuk aplikasi "
+                 "desktop klasik seperti Vaultix ternyata butuh implementasi tingkat rendah "
+                 "yang lebih rumit & berisiko untuk dipasang dengan aman saat ini. "
+                 "Gunakan Password atau PIN untuk sementara - fitur ini akan diaktifkan "
+                 "lagi kalau sudah ada solusi yang teruji aman.",
+            text_color="#888888", anchor="w", wraplength=440, justify="left",
+        ).pack(anchor="w")
+        ctk.CTkSwitch(inner, text="", width=40, state="disabled").pack(side="right")
+
         setting_row(
             "Riwayat Akses Folder", "Lihat folder/file yang baru-baru ini dibuka di perangkat ini (mode ringan & audit log lengkap).",
             "Buka", self.show_access_history,
@@ -1160,6 +1306,24 @@ class VaultixApp(ctk.CTk):
 
     def ask_master_password(self, title="Verifikasi Password") -> bool:
         vault = self.get_active_vault()
+
+        if vault.get("windows_hello_enabled") and self.hello_available():
+            if messagebox.askyesno(
+                title,
+                f"Verifikasi vault '{vault.get('name')}' dengan Windows Hello "
+                "(PIN Hello/sidik jari/wajah - sesuai yang terdaftar di perangkat)?\n\n"
+                "Pilih \"No\" untuk pakai password/PIN biasa.",
+            ):
+                ok, detail = request_windows_hello_verification(
+                    f"Verifikasi untuk membuka vault '{vault.get('name')}' di Vaultix"
+                )
+                if ok:
+                    log_event(self.config_data, "Verifikasi berhasil menggunakan Windows Hello")
+                    return True
+                messagebox.showerror("Gagal", f"Verifikasi Windows Hello gagal:\n\n{detail}")
+                log_event(self.config_data, f"Percobaan verifikasi Windows Hello gagal: {detail}")
+                return False
+
         prompt = f"Masukkan password master vault '{vault.get('name')}':"
         if vault.get("pin_enabled"):
             prompt += "\n(atau PIN Anda)"
@@ -1796,6 +1960,8 @@ class VaultixApp(ctk.CTk):
 
 
 def main():
+    init_com_sta()
+
     if not HAS_CTK:
         root = tk.Tk()
         root.withdraw()
