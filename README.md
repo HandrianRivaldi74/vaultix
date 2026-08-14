@@ -97,7 +97,7 @@ mudah ke paling kompleks:
 5. ✅ **Multiple Vault** — selesai (lihat di bawah).
 6. ⏸ **Windows Hello / Fingerprint / Face** — DITUNDA, dinonaktifkan
    sementara. Lihat penjelasan lengkap di bawah.
-7. ⬜ Mode Encryption terpisah (AES-256-GCM + Argon2id + salt acak)
+7. ✅ **Mode Encryption terpisah** — selesai (lihat di bawah).
 8. ⬜ Screenshot/Recording Protection — **catatan penting**: hanya bisa
    melindungi jendela Vaultix sendiri, TIDAK bisa mencegah screenshot
    File Explorer asli. Baru berguna penuh kalau dipasangkan dengan file
@@ -311,13 +311,139 @@ Kalau di masa depan ada implementasi interop HWND-aware yang sudah
 diuji aman, fitur ini bisa diaktifkan kembali cukup dengan mengubah
 flag tersebut jadi `True` plus kode interop yang benar.
 
+## Fitur Baru: Mode Encryption (AES-256-GCM + Argon2id)
+
+Menu **terpisah** di sidebar ("🔐 Encryption") — sengaja tidak digabung
+dengan mode Sembunyikan/Kunci yang sudah ada, karena mekanismenya
+benar-benar berbeda:
+
+| | Sembunyikan/Kunci (NTFS) | Mode Encryption |
+|---|---|---|
+| Yang diubah | Atribut folder / izin akses | **Isi setiap file**, byte demi byte |
+| Kalau disk diambil & dibaca langsung | Isi file tetap bisa dibaca | Isi file **tetap acak**, tidak bisa dibaca |
+| Reversible tanpa password | Bisa (manual lewat `attrib`/`icacls`) | **Tidak bisa** - tidak ada backdoor |
+
+**Skema kriptografi:**
+- **AES-256-GCM** — AEAD (Authenticated Encryption with Associated
+  Data), jadi *authentication tag* otomatis termasuk di setiap file;
+  kalau file dirusak/diotak-atik, dekripsi akan gagal jelas (bukan
+  data korup diam-diam).
+- **Argon2id** — menurunkan kunci AES-256 dari password master, dengan
+  parameter time_cost=3, memory_cost=64 MB, parallelism=4 (jauh lebih
+  tahan brute-force dibanding hash biasa).
+- **Salt (16 byte) dan nonce (12 byte) acak PER FILE**, disimpan di
+  header masing-masing file terenkripsi - tidak ada yang dipakai ulang.
+- File terenkripsi ditandai ekstensi tambahan `.vaultixenc` dan
+  strukturnya: `MAGIC(5 byte) + SALT(16) + NONCE(12) + CIPHERTEXT+TAG`.
+
+**Cara pakai:**
+1. Centang folder di halaman **Folders** (folder harus dalam status
+   **tidak terkunci** - buka kuncinya dulu kalau masih NTFS-locked).
+2. Buka halaman **🔐 Encryption**, klik **"Enkripsi Folder
+   Tercentang"**.
+3. Masukkan **password master penuh** (bukan PIN/Windows Hello - wajib
+   password asli karena dipakai langsung sebagai bahan Argon2id).
+4. Semua file di dalam folder (rekursif, termasuk subfolder) dienkripsi
+   satu per satu dengan progress bar.
+5. Untuk mengembalikan: centang folder yang berstatus "🔐 Terenkripsi",
+   klik **"Dekripsi Folder Tercentang"**, masukkan password yang sama.
+
+**⚠ Peringatan penting**: **tidak ada mekanisme "lupa password"** untuk
+data terenkripsi. Kalau password vault hilang, file yang terenkripsi
+TIDAK BISA dipulihkan oleh siapa pun, termasuk pengembang aplikasi ini.
+Simpan password dengan sangat hati-hati sebelum mengenkripsi data
+penting.
+
+**Sudah diuji langsung** (bukan cuma ditulis, benar-benar dijalankan):
+enkripsi file → isi jadi acak tanpa jejak plaintext → coba dekripsi
+dengan password salah → gagal total (sesuai harapan) → dekripsi dengan
+password benar → isi pulih 100% sama seperti semula.
+
+## Fitur Baru: Recovery Key (Lupa Password)
+
+Diakses lewat halaman **Settings → Recovery Key → "Buat Sekarang"**
+(atau otomatis ditawarkan tepat setelah password pertama kali dibuat).
+
+**Cara kerja:**
+- Vaultix membuat kode acak 32 karakter (format `XXXX-XXXX-...` x8),
+  ditampilkan **SEKALI SAJA** — Anda harus menyimpannya sendiri (salin,
+  atau kirim ke email lewat aplikasi email default Anda).
+- Yang disimpan Vaultix hanya **hash-nya** (PBKDF2 + salt), sama seperti
+  password — bukan kode aslinya.
+- Kalau lupa password: di dialog verifikasi akan muncul tautan **"Lupa
+  password? Gunakan Recovery Key"** (hanya muncul kalau vault itu sudah
+  punya recovery key). Masukkan kode recovery, kalau benar Anda diminta
+  membuat password master baru.
+
+**Kirim ke email — tanpa Vaultix menyimpan kredensial email Anda:**
+tombol "Kirim ke Email" membuka **aplikasi email default** di
+komputer Anda (lewat `mailto:`) dengan draft sudah terisi kode
+recovery-nya — Anda yang meninjau dan mengirim sendiri. Vaultix tidak
+pernah menyimpan alamat email, password email, atau kredensial SMTP
+apa pun; ini sengaja dihindari karena kalau akun email diretas, itu
+akan langsung membocorkan akses recovery vault juga.
+
+**⚠ Batasan penting yang harus dipahami**: Recovery Key **hanya bisa
+reset password LOGIN vault** (untuk kunci NTFS, PIN, dll). Recovery Key
+**TIDAK BISA** mendekripsi file yang sudah dienkripsi lewat Mode
+Encryption dengan password lama — kunci AES-nya diturunkan langsung
+dari string password asli lewat Argon2id, jadi tidak ada jalan pintas
+tanpa menghancurkan keamanan enkripsinya sendiri. Kalau Anda berencana
+memakai Mode Encryption untuk data penting, password aslinya tetap
+wajib diingat/disimpan terpisah - recovery key tidak menggantikan itu.
+
+**Sudah diuji langsung**: generate key → verifikasi dengan key benar
+(berhasil) → key salah (ditolak) → key dengan huruf kecil/spasi ekstra
+(tetap diterima karena dinormalisasi) — semua sesuai harapan.
+
+## Perbaikan Penting #8 (checkbox Encryption + scroll Settings)
+
+- **Halaman Encryption**: kolom centang folder sebelumnya cuma teks
+  statis (☑/☐), tidak bisa diklik sama sekali. Diganti jadi checkbox
+  sungguhan (`CTkCheckBox`) yang langsung sinkron dua arah dengan
+  centang di halaman Folders — centang di salah satu halaman, otomatis
+  ikut tercentang juga di halaman satunya.
+- **Halaman Settings**: sebelumnya semua kartu (Password, PIN, Recovery
+  Key, Windows Hello, Riwayat Akses, Auto Lock, Hapus Vault) dipasang
+  langsung tanpa area scroll, jadi kartu-kartu di bagian bawah hilang
+  begitu jendela dikecilkan. Sekarang dibungkus dalam area scrollable -
+  semua kartu selalu bisa dijangkau dengan scroll berapa pun ukuran
+  jendelanya.
+
+## Perbaikan Penting #9 (race condition: Auto Lock vs proses enkripsi/aksi lain)
+
+Ditemukan bug: **Auto Lock berjalan di timer latar belakang** (dicek
+tiap 5 detik) dan timer ini **tetap aktif meski ada dialog progress bar
+modal** sedang terbuka (mis. saat sedang mengenkripsi folder besar).
+Akibatnya, kalau Auto Lock terpicu (misalnya karena idle) di
+tengah-tengah proses enkripsi, folder yang sedang diproses ikut dikunci
+NTFS — menyebabkan file-file yang belum sempat dienkripsi gagal diakses
+dan tertinggal dalam status campur aduk (sebagian `.vaultixenc`,
+sebagian masih plaintext).
+
+**Perbaikan**: folder yang sedang diproses aksi apa pun (Sembunyikan,
+Kunci, Enkripsi, Dekripsi, dll) sekarang ditandai di
+`self.paths_in_progress`, dan Auto Lock **melewati** folder yang sedang
+ditandai itu sampai prosesnya benar-benar selesai. Race condition ini
+tidak akan terjadi lagi.
+
+**Kalau folder Anda sudah kadung tercampur** (sebagian file
+`.vaultixenc`, sebagian belum, status terkunci): buka kunci foldernya
+dulu di halaman Folders, lalu jalankan "Dekripsi Folder Tercentang" di
+halaman Encryption — ini aman, hanya memproses file `.vaultixenc` yang
+sempat kepotong, file yang memang belum sempat dienkripsi tidak
+diapa-apakan.
+
 ## Dependensi
 
 ```
-pip install customtkinter pywin32
+pip install customtkinter pywin32 cryptography argon2-cffi
 ```
 
 - `customtkinter` **wajib** — dipakai untuk seluruh tampilan aplikasi.
+- `cryptography` dan `argon2-cffi` **wajib untuk Mode Encryption** —
+  tanpa ini, halaman "🔐 Encryption" menampilkan pesan jelas untuk
+  install dulu, sisa aplikasi tetap jalan normal.
 - `pywin32` opsional, hanya dipakai fitur "Riwayat Akses Folder" bagian
   Recent Items. Tanpa ini aplikasi tetap jalan normal.
 - `winsdk` **tidak diperlukan lagi untuk saat ini** — fitur Windows
@@ -335,7 +461,7 @@ python main.py
 ## Membuat file .exe standalone
 
 ```
-pip install pyinstaller customtkinter pywin32
+pip install pyinstaller customtkinter pywin32 cryptography argon2-cffi
 pyinstaller --onefile --noconsole --name "Vaultix" main.py
 ```
 
@@ -346,7 +472,7 @@ File hasilnya ada di `dist\Vaultix.exe`.
 1. Jalankan aplikasi. Pertama kali dibuka, Anda diminta membuat
    **password master**.
 2. Navigasi antar halaman lewat **sidebar kiri**: 📁 Folders (utama),
-   📊 Dashboard, 🛡 Activity, ⚙ Settings.
+   🔐 Encryption, 📊 Dashboard, 🛡 Activity, ⚙ Settings.
 3. Di halaman **Folders**, klik **"+ Tambah Folder"** untuk membuka
    dialog pilih folder bawaan Windows. Satu folder per klik — ulangi
    tombolnya untuk menambahkan folder lain.
@@ -358,12 +484,17 @@ File hasilnya ada di `dist\Vaultix.exe`.
      sudah diaktifkan).
    - **Kunci & Sembunyikan** / **Buka Kunci & Tampilkan** — gabungan
      keduanya.
-5. **Hapus dari Daftar** hanya bisa dilakukan untuk folder yang sudah
-   dalam kondisi terlihat & tidak terkunci (untuk mencegah folder
-   terkunci "hilang jejak" dari daftar).
-6. Halaman **⚙ Settings** berisi Ganti Password, Atur PIN, dan tombol
+5. Halaman **🔐 Encryption** — pakai centang folder yang sama untuk
+   **Enkripsi/Dekripsi** isi file sungguhan (AES-256-GCM). Folder harus
+   tidak terkunci dulu, dan wajib pakai password master penuh (bukan
+   PIN). Baca peringatan di halaman itu sebelum dipakai untuk data
+   penting.
+6. **Hapus dari Daftar** hanya bisa dilakukan untuk folder yang sudah
+   dalam kondisi terlihat, tidak terkunci, dan tidak terenkripsi
+   (untuk mencegah folder "hilang jejak" dari daftar).
+7. Halaman **⚙ Settings** berisi Ganti Password, Atur PIN, dan tombol
    ke Riwayat Akses Folder.
-7. Ganti tema Light/Dark/System dari dropdown di bagian bawah sidebar.
+8. Ganti tema Light/Dark/System dari dropdown di bagian bawah sidebar.
 
 ## Catatan Keamanan
 

@@ -33,6 +33,8 @@ import secrets
 import subprocess
 import sys
 import threading
+import urllib.parse
+import webbrowser
 import tkinter as tk
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
@@ -54,6 +56,13 @@ try:
     HAS_CTK = True
 except ImportError:
     HAS_CTK = False
+
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from argon2.low_level import hash_secret_raw, Type as Argon2Type
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
 
 APP_DIR = os.path.join(os.path.expanduser("~"), ".vaultix")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
@@ -97,6 +106,7 @@ def new_vault_dict(name: str) -> dict:
         "salt": None, "password_hash": None, "password_strength": None,
         "pin_enabled": False, "pin_hash": None, "pin_salt": None,
         "windows_hello_enabled": False,
+        "recovery_key_hash": None, "recovery_key_salt": None, "recovery_key_created_at": None,
         "folders": [],
         "auto_lock_enabled": False, "auto_lock_minutes": 5,
         "auto_lock_triggers": {"inactive": True, "lock": True, "focus_loss": False},
@@ -158,10 +168,15 @@ def load_config():
         vault.setdefault("folders", [])
         vault.setdefault("pin_enabled", False)
         vault.setdefault("windows_hello_enabled", False)
+        vault.setdefault("recovery_key_hash", None)
+        vault.setdefault("recovery_key_salt", None)
+        vault.setdefault("recovery_key_created_at", None)
         vault.setdefault("auto_lock_enabled", False)
         vault.setdefault("auto_lock_minutes", 5)
         vault.setdefault("auto_lock_triggers", {"inactive": True, "lock": True, "focus_loss": False})
         vault.setdefault("encryption_enabled", False)
+        for entry in vault.get("folders", []):
+            entry.setdefault("encrypted", False)
     return data
 
 
@@ -237,6 +252,44 @@ def disable_pin(vault: dict):
     vault["pin_enabled"] = False
     vault["pin_hash"] = None
     vault["pin_salt"] = None
+
+
+# ---------------------------------------------------------------------------
+# Recovery Key: cara reset PASSWORD LOGIN vault kalau lupa.
+# ---------------------------------------------------------------------------
+#
+# PENTING - batasan yang harus selalu jelas ke pengguna: recovery key ini
+# HANYA bisa mereset password login vault (dipakai untuk buka kunci NTFS,
+# PIN, dll). Recovery key TIDAK BISA mendekripsi file yang sudah dienkripsi
+# lewat Mode Encryption dengan password lama, karena kunci AES-nya
+# diturunkan langsung dari string password itu sendiri lewat Argon2id -
+# tidak ada jalan pintas tanpa menghancurkan keamanan enkripsinya sendiri.
+
+def generate_recovery_key() -> str:
+    raw = secrets.token_hex(16).upper()  # 32 karakter hex
+    return "-".join(raw[i:i + 4] for i in range(0, len(raw), 4))  # XXXX-XXXX-...x8
+
+
+def set_recovery_key(vault: dict, raw_key: str):
+    salt = secrets.token_bytes(16)
+    vault["recovery_key_salt"] = salt.hex()
+    vault["recovery_key_hash"] = hash_password(raw_key.strip().upper(), salt)
+    vault["recovery_key_created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def verify_recovery_key(vault: dict, raw_key: str) -> bool:
+    if not vault.get("recovery_key_hash") or not vault.get("recovery_key_salt"):
+        return False
+    salt = bytes.fromhex(vault["recovery_key_salt"])
+    return hash_password(raw_key.strip().upper(), salt) == vault["recovery_key_hash"]
+
+
+def open_email_draft(subject: str, body: str):
+    """Buka aplikasi email default pengguna dengan draft sudah terisi,
+    lewat mailto: - Vaultix tidak pernah menyimpan/mengirim email sendiri,
+    tidak butuh kredensial SMTP apa pun."""
+    url = "mailto:?subject=" + urllib.parse.quote(subject) + "&body=" + urllib.parse.quote(body)
+    webbrowser.open(url)
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +430,100 @@ def request_windows_hello_verification(message: str):
         return False, "Package 'winsdk' belum terinstall. Jalankan: pip install winsdk"
     except Exception as e:
         return False, f"Terjadi error teknis saat memanggil Windows Hello: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Mode Encryption: AES-256-GCM (AEAD) + Argon2id + salt/nonce acak per file
+# ---------------------------------------------------------------------------
+#
+# Ini MENU TERPISAH dari mode Sembunyikan/Kunci di atas (yang berbasis
+# atribut Windows + izin NTFS, TIDAK mengubah isi file). Mode ini
+# benar-benar mengenkripsi ISI setiap file dalam folder - walaupun
+# seseorang mengambil hard disk/SSD dan membaca file secara langsung
+# (bypass Windows sepenuhnya), isinya tetap acak tanpa password yang
+# benar.
+#
+# Format file terenkripsi (ekstensi ditambah .vaultixenc):
+#   MAGIC(5 byte "VLTX1") + SALT(16 byte) + NONCE(12 byte) + CIPHERTEXT+TAG
+#
+# - Argon2id menurunkan kunci AES-256 dari password, dengan salt acak
+#   PER FILE (bukan dipakai ulang) - parameter: time_cost=3,
+#   memory_cost=64 MB, parallelism=4.
+# - AES-256-GCM adalah AEAD: authentication tag sudah termasuk otomatis
+#   di akhir ciphertext, jadi setiap file dirusak/diotak-atik akan
+#   ketahuan saat didekripsi (gagal dengan error, bukan data korup diam-diam).
+
+ENC_MAGIC = b"VLTX1"
+ENC_SUFFIX = ".vaultixenc"
+
+
+def derive_key_argon2id(password: str, salt: bytes) -> bytes:
+    return hash_secret_raw(
+        secret=password.encode("utf-8"), salt=salt,
+        time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=Argon2Type.ID,
+    )
+
+
+def encrypt_file(path: str, password: str):
+    with open(path, "rb") as f:
+        plaintext = f.read()
+    salt = secrets.token_bytes(16)
+    nonce = secrets.token_bytes(12)
+    key = derive_key_argon2id(password, salt)
+    ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+    new_path = path + ENC_SUFFIX
+    with open(new_path, "wb") as f:
+        f.write(ENC_MAGIC + salt + nonce + ciphertext)
+    os.remove(path)
+
+
+def decrypt_file(path: str, password: str):
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:5] != ENC_MAGIC:
+        raise ValueError(f"Bukan file terenkripsi Vaultix: {path}")
+    salt, nonce, ciphertext = data[5:21], data[21:33], data[33:]
+    key = derive_key_argon2id(password, salt)
+    plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)  # exception kalau password salah/rusak
+    if not path.endswith(ENC_SUFFIX):
+        raise ValueError(f"Nama file tidak sesuai format Vaultix: {path}")
+    new_path = path[: -len(ENC_SUFFIX)]
+    with open(new_path, "wb") as f:
+        f.write(plaintext)
+    os.remove(path)
+
+
+def encrypt_folder(folder_path: str, password: str):
+    """Enkripsi semua file dalam folder (rekursif). Mengembalikan
+    (jumlah_berhasil, [(path, error), ...] yang gagal)."""
+    success, failed = 0, []
+    for root, _dirs, files in os.walk(folder_path):
+        for name in files:
+            if name.endswith(ENC_SUFFIX):
+                continue  # sudah terenkripsi, lewati
+            full_path = os.path.join(root, name)
+            try:
+                encrypt_file(full_path, password)
+                success += 1
+            except Exception as e:
+                failed.append((full_path, str(e)))
+    return success, failed
+
+
+def decrypt_folder(folder_path: str, password: str):
+    """Dekripsi semua file .vaultixenc dalam folder (rekursif)."""
+    success, failed = 0, []
+    for root, _dirs, files in os.walk(folder_path):
+        for name in files:
+            if not name.endswith(ENC_SUFFIX):
+                continue
+            full_path = os.path.join(root, name)
+            try:
+                decrypt_file(full_path, password)
+                success += 1
+            except Exception as e:
+                failed.append((full_path, str(e)))
+    return success, failed
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +756,8 @@ def center_window(win, width, height):
 def status_text(entry):
     hide_part = "🙈 Tersembunyi" if entry.get("hidden") else "👁 Terlihat"
     lock_part = "🔒 Terkunci" if entry.get("locked") else "🔓 Terbuka"
-    return hide_part, lock_part
+    enc_part = "🔐 Terenkripsi" if entry.get("encrypted") else "— Tidak Terenkripsi"
+    return hide_part, lock_part, enc_part
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +771,7 @@ class VaultixApp(ctk.CTk):
         self.config_data = load_config()
         self.checked_paths = set()
         self._hello_available = None
+        self.paths_in_progress = set()  # folder yang sedang diproses aksi apa pun - dilewati Auto Lock
 
         ctk.set_appearance_mode(self.config_data.get("theme", "System"))
 
@@ -675,6 +824,7 @@ class VaultixApp(ctk.CTk):
         if hasattr(self, "views"):
             self._build_dashboard_view(self.views["dashboard"])
             self._build_settings_view_refresh()
+            self._build_encryption_view(self.views["encryption"])
 
     def open_create_vault_dialog(self):
         box = ctk.CTkToplevel(self)
@@ -781,14 +931,16 @@ class VaultixApp(ctk.CTk):
         self._build_settings_view(self.views["settings"])
 
     # -- dialog password bertema (menggantikan simpledialog polos) ---------
-    def ask_password_dialog(self, title, prompt, confirm=False):
+    def ask_password_dialog(self, title, prompt, confirm=False, show_forgot_link=False):
         """Dialog input password ala CustomTkinter yang ikut tema Light/Dark.
         Kalau confirm=True, ada kolom ulangi password + validasi panjang
-        minimal & kecocokan. Mengembalikan password (str) atau None kalau
-        dibatalkan."""
+        minimal & kecocokan. Kalau show_forgot_link=True, ada tautan "Lupa
+        password?" yang membuka alur recovery key. Mengembalikan password
+        (str) atau None kalau dibatalkan."""
         box = ctk.CTkToplevel(self)
         box.title(title)
-        W, H = (380, 260) if confirm else (380, 190)
+        H = (260 if confirm else 190) + (30 if show_forgot_link else 0)
+        W = 380
         box.geometry(f"{W}x{H}")
         center_window(box, W, H)
         box.transient(self)
@@ -828,9 +980,20 @@ class VaultixApp(ctk.CTk):
         def cancel():
             box.destroy()
 
+        def forgot():
+            box.destroy()
+            self.after(50, self.open_recovery_flow)
+
         entry1.bind("<Return>", submit)
         if entry2:
             entry2.bind("<Return>", submit)
+
+        if show_forgot_link:
+            ctk.CTkButton(
+                box, text="Lupa password? Gunakan Recovery Key", fg_color="transparent",
+                text_color=("#1f6aa5", "#4da3ff"), hover_color=("gray90", "gray20"),
+                command=forgot,
+            ).pack(pady=(4, 0))
 
         btn_frame = ctk.CTkFrame(box, fg_color="transparent")
         btn_frame.pack(pady=15)
@@ -861,6 +1024,14 @@ class VaultixApp(ctk.CTk):
         log_event(self.config_data, "Password master dibuat")
         messagebox.showinfo("Sukses", "Password master berhasil dibuat.")
 
+        if messagebox.askyesno(
+            "Buat Recovery Key?",
+            "Disarankan: buat Recovery Key sekarang untuk jaga-jaga kalau lupa "
+            "password nanti. Hanya bisa dibuat kalau Anda masih ingat password "
+            "(tidak bisa dibuat setelah lupa). Buat sekarang?",
+        ):
+            self.open_generate_recovery_key()
+
     # -- UI ---------------------------------------------------------------
     def build_ui(self):
         self.grid_rowconfigure(0, weight=1)
@@ -885,6 +1056,7 @@ class VaultixApp(ctk.CTk):
         self.nav_buttons = {}
         nav_items = [
             ("folders", "📁 Folders"),
+            ("encryption", "🔐 Encryption"),
             ("dashboard", "📊 Dashboard"),
             ("activity", "🛡 Activity"),
             ("settings", "⚙ Settings"),
@@ -920,6 +1092,7 @@ class VaultixApp(ctk.CTk):
             self.views[key] = frame
 
         self._build_folders_view(self.views["folders"])
+        self._build_encryption_view(self.views["encryption"])
         self._build_dashboard_view(self.views["dashboard"])
         self._build_activity_view(self.views["activity"])
         self._build_settings_view(self.views["settings"])
@@ -934,6 +1107,8 @@ class VaultixApp(ctk.CTk):
             self._build_dashboard_view(self.views["dashboard"])
         elif key == "activity":
             self.refresh_activity_log()
+        elif key == "encryption":
+            self._build_encryption_view(self.views["encryption"])
 
     # -- view: daftar folder + aksi -----------------------------------------
     def _build_folders_view(self, parent):
@@ -960,16 +1135,18 @@ class VaultixApp(ctk.CTk):
         tree_container = ctk.CTkFrame(list_frame, fg_color="transparent")
         tree_container.pack(fill="both", expand=True, padx=10, pady=10)
 
-        columns = ("check", "path", "hidden", "locked")
+        columns = ("check", "path", "hidden", "locked", "encrypted")
         self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="none", height=10)
         self.tree.heading("check", text="✓")
         self.tree.heading("path", text="Folder")
         self.tree.heading("hidden", text="Status Tampilan")
         self.tree.heading("locked", text="Status Kunci")
+        self.tree.heading("encrypted", text="Status Enkripsi")
         self.tree.column("check", width=40, anchor="center")
-        self.tree.column("path", width=320)
-        self.tree.column("hidden", width=140, anchor="center")
-        self.tree.column("locked", width=140, anchor="center")
+        self.tree.column("path", width=260)
+        self.tree.column("hidden", width=120, anchor="center")
+        self.tree.column("locked", width=120, anchor="center")
+        self.tree.column("encrypted", width=140, anchor="center")
         self.tree.pack(side="left", fill="both", expand=True)
         self.tree.bind("<Button-1>", self.on_tree_click)
 
@@ -1006,13 +1183,183 @@ class VaultixApp(ctk.CTk):
         ctk.CTkButton(combo_box, text="Buka Kunci & Tampilkan", width=220, command=self.action_unlock_and_unhide).pack(fill="x")
 
     # -- view: pengaturan -----------------------------------------------------
+    # -- view: Mode Encryption (menu terpisah dari Sembunyikan/Kunci) --------
+    def _build_encryption_view(self, parent):
+        for w in parent.winfo_children():
+            w.destroy()
+
+        av = self.get_active_vault()
+
+        header = ctk.CTkFrame(parent, fg_color="transparent")
+        header.pack(fill="x", padx=25, pady=(20, 5))
+        ctk.CTkLabel(header, text="🔐 Mode Encryption", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+
+        if not HAS_CRYPTO:
+            ctk.CTkLabel(
+                parent,
+                text="Fitur ini butuh package tambahan yang belum terinstall:\n"
+                     "pip install cryptography argon2-cffi\n\n"
+                     "Install dulu lalu buka lagi Vaultix.",
+                text_color="#c0392b", justify="left",
+            ).pack(anchor="w", padx=25, pady=20)
+            return
+
+        ctk.CTkLabel(
+            parent,
+            text="Berbeda dari mode Sembunyikan/Kunci (yang hanya mengubah atribut/izin, "
+                 "TIDAK menyentuh isi file) - mode ini benar-benar MENGENKRIPSI ISI setiap "
+                 "file di dalam folder terpilih pakai AES-256-GCM, kunci diturunkan dari "
+                 "password Anda lewat Argon2id. Walaupun hard disk/SSD diambil dan dibaca "
+                 "langsung (bypass Windows sepenuhnya), isinya tetap acak tanpa password "
+                 "yang benar.",
+            text_color="#888888", wraplength=680, justify="left",
+        ).pack(anchor="w", padx=25, pady=(0, 10))
+        ctk.CTkLabel(
+            parent,
+            text="⚠ PENTING: tidak ada mekanisme 'lupa password' untuk data terenkripsi. "
+                 "Kalau password vault ini hilang, file yang terenkripsi TIDAK BISA "
+                 "dipulihkan oleh siapa pun, termasuk Anda sendiri. File yang sedang "
+                 "terkunci (NTFS) harus dibuka kuncinya dulu sebelum bisa dienkripsi/didekripsi.",
+            text_color="#c0392b", wraplength=680, justify="left",
+        ).pack(anchor="w", padx=25, pady=(0, 15))
+
+        folders = av.get("folders", [])
+        list_box = ctk.CTkScrollableFrame(parent, height=260)
+        list_box.pack(fill="both", expand=True, padx=25, pady=(0, 10))
+
+        if not folders:
+            ctk.CTkLabel(list_box, text="Belum ada folder di daftar (tambahkan dulu di halaman Folders).", text_color="#888888").pack(anchor="w", pady=10)
+        else:
+            ctk.CTkLabel(
+                list_box, text="Centang folder yang mau diproses (tercentang di sini otomatis "
+                               "tercentang juga di halaman Folders, dan sebaliknya).",
+                text_color="#888888", wraplength=640, justify="left",
+            ).pack(anchor="w", pady=(0, 8))
+            for entry in folders:
+                row = ctk.CTkFrame(list_box, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+                name = os.path.basename(entry["path"].rstrip("\\/")) or entry["path"]
+                status = "🔐 Terenkripsi" if entry.get("encrypted") else "— Tidak Terenkripsi"
+
+                var = tk.BooleanVar(value=entry["path"] in self.checked_paths)
+
+                def on_toggle(path=entry["path"], var=var):
+                    if var.get():
+                        self.checked_paths.add(path)
+                    else:
+                        self.checked_paths.discard(path)
+                    if hasattr(self, "tree"):
+                        self.tree.set(path, "check", "☑" if var.get() else "☐")
+
+                ctk.CTkCheckBox(row, text=name, variable=var, command=on_toggle, width=320).pack(side="left")
+                ctk.CTkLabel(row, text=status, anchor="w").pack(side="left", padx=(10, 0))
+
+        btn_row = ctk.CTkFrame(parent, fg_color="transparent")
+        btn_row.pack(fill="x", padx=25, pady=(0, 20))
+        ctk.CTkButton(btn_row, text="Enkripsi Folder Tercentang", width=220, command=self.action_encrypt).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text="Dekripsi Folder Tercentang", width=220, fg_color="gray40", hover_color="gray30",
+            command=self.action_decrypt,
+        ).pack(side="left")
+
+    def ask_master_password_for_encryption(self, title: str):
+        """Khusus untuk operasi enkripsi/dekripsi: WAJIB password master penuh
+        (bukan PIN/Windows Hello), karena passwordnya sendiri dipakai sebagai
+        bahan penurunan kunci enkripsi lewat Argon2id - bukan sekadar
+        verifikasi ya/tidak. Mengembalikan password (str) atau None."""
+        vault = self.get_active_vault()
+        pw = self.ask_password_dialog(
+            title,
+            f"Masukkan password master penuh vault '{vault.get('name')}'\n"
+            "(wajib password, bukan PIN - dipakai langsung sebagai bahan kunci enkripsi):",
+        )
+        if pw is None:
+            return None
+        if not verify_password(vault, pw):
+            messagebox.showerror("Error", "Password salah.")
+            log_event(self.config_data, "Percobaan password salah (operasi enkripsi)")
+            return None
+        return pw
+
+    def action_encrypt(self):
+        entries = self.get_selected_entries()
+        if not entries:
+            return
+        already_locked = [e["path"] for e in entries if e.get("locked")]
+        if already_locked:
+            messagebox.showwarning(
+                "Info",
+                "Folder berikut masih terkunci (NTFS) - buka kunci dulu sebelum dienkripsi:\n"
+                + "\n".join(already_locked),
+            )
+            return
+        already_encrypted = [e for e in entries if e.get("encrypted")]
+        entries = [e for e in entries if not e.get("encrypted")]
+        if already_encrypted:
+            messagebox.showinfo(
+                "Info",
+                f"{len(already_encrypted)} folder dilewati (sudah terenkripsi):\n"
+                + "\n".join(e["path"] for e in already_encrypted),
+            )
+        if not entries:
+            return
+
+        pw = self.ask_master_password_for_encryption("Password untuk Mengenkripsi")
+        if pw is None:
+            return
+
+        def worker(entry):
+            success, failed = encrypt_folder(entry["path"], pw)
+            if failed:
+                raise RuntimeError(f"{len(failed)} dari {success + len(failed)} file gagal dienkripsi (folder mungkin sebagian terenkripsi, cek manual)")
+            entry["encrypted"] = True
+            log_event(self.config_data, f"Folder dienkripsi: {entry['path']} ({success} file)")
+
+        self.run_bulk_action(
+            entries, worker, "Mengenkripsi Folder (AES-256-GCM)...",
+            "berhasil dienkripsi", "dienkripsi",
+        )
+        self._build_encryption_view(self.views["encryption"])
+
+    def action_decrypt(self):
+        entries = self.get_selected_entries()
+        if not entries:
+            return
+        entries = [e for e in entries if e.get("encrypted")]
+        if not entries:
+            messagebox.showinfo("Info", "Tidak ada folder terenkripsi di antara yang dicentang.")
+            return
+
+        pw = self.ask_master_password_for_encryption("Password untuk Mendekripsi")
+        if pw is None:
+            return
+
+        def worker(entry):
+            success, failed = decrypt_folder(entry["path"], pw)
+            if failed:
+                raise RuntimeError(
+                    f"{len(failed)} dari {success + len(failed)} file gagal didekripsi "
+                    "(kemungkinan password salah, atau file rusak/diotak-atik)"
+                )
+            entry["encrypted"] = False
+            log_event(self.config_data, f"Folder didekripsi: {entry['path']} ({success} file)")
+
+        self.run_bulk_action(
+            entries, worker, "Mendekripsi Folder...",
+            "berhasil didekripsi", "didekripsi",
+        )
+        self._build_encryption_view(self.views["encryption"])
+
     def _build_settings_view(self, parent):
         av = self.get_active_vault()
         ctk.CTkLabel(parent, text="⚙ Settings", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=25, pady=(20, 0))
         ctk.CTkLabel(parent, text=f"Vault aktif: {av.get('name')}", text_color="#888888").pack(anchor="w", padx=25, pady=(0, 15))
 
+        scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+
         def setting_row(title, desc, btn_text, command, danger=False):
-            box = ctk.CTkFrame(parent)
+            box = ctk.CTkFrame(scroll)
             box.pack(fill="x", padx=25, pady=6)
             inner = ctk.CTkFrame(box, fg_color="transparent")
             inner.pack(fill="x", padx=15, pady=12)
@@ -1032,8 +1379,22 @@ class VaultixApp(ctk.CTk):
             "Atur PIN", self.open_pin_settings,
         )
 
+        recovery_created = av.get("recovery_key_created_at")
+        recovery_desc = (
+            f"Dibuat: {recovery_created}. Bisa dipakai untuk reset password login vault "
+            "kalau lupa (tidak bisa membuka file yang sudah dienkripsi dengan password lama)."
+            if recovery_created else
+            "Belum dibuat. Sangat disarankan dibuat SEKARANG selagi masih ingat password - "
+            "tidak bisa dibuat lagi setelah lupa password."
+        )
+        setting_row(
+            "Recovery Key", recovery_desc,
+            "Buat Ulang" if recovery_created else "Buat Sekarang",
+            self.open_generate_recovery_key,
+        )
+
         # -- Windows Hello: DINONAKTIFKAN SEMENTARA, lihat catatan di kode --
-        box = ctk.CTkFrame(parent)
+        box = ctk.CTkFrame(scroll)
         box.pack(fill="x", padx=25, pady=6)
         inner = ctk.CTkFrame(box, fg_color="transparent")
         inner.pack(fill="x", padx=15, pady=12)
@@ -1060,7 +1421,7 @@ class VaultixApp(ctk.CTk):
         )
 
         # -- Auto Lock (punya switch on/off, bukan cuma tombol) --
-        box = ctk.CTkFrame(parent)
+        box = ctk.CTkFrame(scroll)
         box.pack(fill="x", padx=25, pady=6)
         inner = ctk.CTkFrame(box, fg_color="transparent")
         inner.pack(fill="x", padx=15, pady=12)
@@ -1097,7 +1458,10 @@ class VaultixApp(ctk.CTk):
         if not triggers.get(reason, False):
             return
 
-        unlocked = [e for e in vault.get("folders", []) if not e.get("locked")]
+        unlocked = [
+            e for e in vault.get("folders", [])
+            if not e.get("locked") and e["path"] not in self.paths_in_progress
+        ]
         if not unlocked:
             return
 
@@ -1271,9 +1635,12 @@ class VaultixApp(ctk.CTk):
         valid_paths = {e["path"] for e in folders}
         self.checked_paths &= valid_paths  # buang path yang sudah tidak ada di daftar
         for entry in folders:
-            hide_part, lock_part = status_text(entry)
+            hide_part, lock_part, enc_part = status_text(entry)
             check_symbol = "☑" if entry["path"] in self.checked_paths else "☐"
-            self.tree.insert("", tk.END, iid=entry["path"], values=(check_symbol, entry["path"], hide_part, lock_part))
+            self.tree.insert(
+                "", tk.END, iid=entry["path"],
+                values=(check_symbol, entry["path"], hide_part, lock_part, enc_part),
+            )
 
     def on_tree_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -1327,7 +1694,7 @@ class VaultixApp(ctk.CTk):
         prompt = f"Masukkan password master vault '{vault.get('name')}':"
         if vault.get("pin_enabled"):
             prompt += "\n(atau PIN Anda)"
-        pw = self.ask_password_dialog(title, prompt)
+        pw = self.ask_password_dialog(title, prompt, show_forgot_link=bool(vault.get("recovery_key_hash")))
         if pw is None:
             return False
         if verify_password(vault, pw):
@@ -1351,7 +1718,16 @@ class VaultixApp(ctk.CTk):
     def run_bulk_action(self, entries, worker, title, verb_success, verb_failed):
         """Jalankan `worker(entry)` untuk setiap entry di background thread
         sambil menampilkan progress bar, supaya UI tidak macet saat memproses
-        folder besar (icacls/atribut pada folder besar bisa memakan waktu)."""
+        folder besar (icacls/atribut pada folder besar bisa memakan waktu).
+
+        Selama proses berjalan, folder yang diproses ditandai di
+        self.paths_in_progress supaya Auto Lock (yang jalan di timer latar
+        belakang, tetap aktif meski ada dialog modal) tidak ikut mengunci
+        folder yang sedang diproses - itu race condition yang pernah
+        menyebabkan sebagian file gagal terenkripsi di tengah proses."""
+        in_progress_paths = {e["path"] for e in entries}
+        self.paths_in_progress |= in_progress_paths
+
         progress = ctk.CTkToplevel(self)
         progress.title(title)
         W, H = 440, 150
@@ -1398,6 +1774,7 @@ class VaultixApp(ctk.CTk):
                         bar.stop()
                         progress.grab_release()
                         progress.destroy()
+                        self.paths_in_progress -= in_progress_paths
                         save_config(self.config_data)
                         self.refresh_list()
                         self.show_result_summary(success, failed, verb_success, verb_failed)
@@ -1465,7 +1842,7 @@ class VaultixApp(ctk.CTk):
             return
 
         vault = self.get_active_vault()
-        vault.setdefault("folders", []).append({"path": folder, "hidden": False, "locked": False})
+        vault.setdefault("folders", []).append({"path": folder, "hidden": False, "locked": False, "encrypted": False})
         save_config(self.config_data)
         self.refresh_list()
 
@@ -1566,12 +1943,12 @@ class VaultixApp(ctk.CTk):
         entries = self.get_selected_entries()
         if not entries:
             return
-        blocked = [e["path"] for e in entries if e.get("hidden") or e.get("locked")]
+        blocked = [e["path"] for e in entries if e.get("hidden") or e.get("locked") or e.get("encrypted")]
         if blocked:
             messagebox.showwarning(
                 "Info",
-                "Folder berikut masih tersembunyi/terkunci, buka dulu sebelum dihapus dari daftar:\n"
-                + "\n".join(blocked),
+                "Folder berikut masih tersembunyi/terkunci/terenkripsi, kembalikan dulu "
+                "ke status normal sebelum dihapus dari daftar:\n" + "\n".join(blocked),
             )
             return
         if not messagebox.askyesno("Konfirmasi", "Hapus folder terpilih dari daftar? (folder itu sendiri tidak akan dihapus)"):
@@ -1602,7 +1979,10 @@ class VaultixApp(ctk.CTk):
             score += 2
         elif locked_count > 0:
             score += 1
-        if score >= 4:
+        encrypted_count_for_score = sum(1 for f in folders if f.get("encrypted"))
+        if encrypted_count_for_score > 0:
+            score += 1
+        if score >= 5:
             vault_label, vault_color = "Kuat", "green"
         elif score >= 2:
             vault_label, vault_color = "Sedang", "yellow"
@@ -1629,10 +2009,16 @@ class VaultixApp(ctk.CTk):
         inner.pack(fill="x", padx=15, pady=15)
 
         status_row(inner, "Vault Security", vault_label, vault_color)
-        status_row(
-            inner, "Encryption", "Nonaktif (mode: Kunci NTFS)", "red",
-            note="Bukan enkripsi sungguhan - lihat 'Mode Encryption (AES-256)' di roadmap #7, belum tersedia.",
-        )
+        encrypted_count = sum(1 for f in folders if f.get("encrypted"))
+        if encrypted_count > 0:
+            status_row(
+                inner, "Encryption", f"AES-256-GCM ({encrypted_count} dari {total} folder)", "green",
+            )
+        else:
+            status_row(
+                inner, "Encryption", "Belum ada folder yang dienkripsi", "red",
+                note="Enkripsi AES-256-GCM tersedia di halaman '🔐 Encryption' - terpisah dari mode Sembunyikan/Kunci.",
+            )
         status_row(inner, "Password", pw_strength, pw_color)
         auto_lock_on = av.get("auto_lock_enabled", False)
         auto_lock_minutes = av.get("auto_lock_minutes", 5)
@@ -1957,6 +2343,125 @@ class VaultixApp(ctk.CTk):
         ctk.CTkButton(
             btn_frame, text="Nonaktifkan PIN", width=130, fg_color="gray40", hover_color="gray30", command=remove_pin,
         ).pack(side="left", padx=5)
+
+    # -- recovery key ---------------------------------------------------------
+    def open_generate_recovery_key(self):
+        vault = self.get_active_vault()
+        if vault.get("recovery_key_hash"):
+            if not self.ask_master_password(f"Verifikasi untuk Membuat Ulang Recovery Key '{vault.get('name')}'"):
+                return
+            if not messagebox.askyesno(
+                "Konfirmasi",
+                "Vault ini sudah punya recovery key. Membuat yang baru akan membuat "
+                "recovery key LAMA tidak berlaku lagi. Lanjutkan?",
+            ):
+                return
+
+        new_key = generate_recovery_key()
+        set_recovery_key(vault, new_key)
+        save_config(self.config_data)
+        log_event(self.config_data, f"Recovery key vault '{vault.get('name')}' dibuat/diperbarui")
+        self.show_recovery_key_dialog(new_key, vault.get("name"))
+
+    def show_recovery_key_dialog(self, key: str, vault_name: str):
+        box = ctk.CTkToplevel(self)
+        box.title("Recovery Key Anda")
+        W, H = 460, 400
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.resizable(False, False)
+        box.protocol("WM_DELETE_WINDOW", lambda: None)  # cegah ditutup tanpa konfirmasi "sudah simpan"
+
+        ctk.CTkLabel(
+            box, text=f"Recovery Key untuk vault '{vault_name}'",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(padx=20, pady=(20, 5))
+        ctk.CTkLabel(
+            box,
+            text="Simpan ini di tempat AMAN (password manager, kertas, dsb). "
+                 "Hanya ditampilkan SEKALI - kalau tertutup, tidak bisa dilihat lagi "
+                 "(harus buat baru, yang lama otomatis tidak berlaku).",
+            text_color="#c0392b", wraplength=400, justify="left",
+        ).pack(padx=20, pady=(0, 10))
+
+        key_box = ctk.CTkEntry(box, width=400, justify="center", font=ctk.CTkFont(size=15, weight="bold"))
+        key_box.insert(0, key)
+        key_box.configure(state="readonly")
+        key_box.pack(padx=20, pady=5)
+
+        ctk.CTkLabel(
+            box,
+            text="⚠ Recovery key ini HANYA untuk reset password login vault "
+                 "(buka kunci NTFS, PIN, dll). TIDAK BISA membuka file yang sudah "
+                 "dienkripsi lewat Mode Encryption dengan password lama - untuk itu, "
+                 "password aslinya wajib diingat/disimpan terpisah.",
+            text_color="#888888", wraplength=400, justify="left",
+        ).pack(padx=20, pady=(10, 15))
+
+        def copy_key():
+            self.clipboard_clear()
+            self.clipboard_append(key)
+
+        def send_email():
+            subject = f"Vaultix Recovery Key - {vault_name}"
+            body = (
+                f"Recovery Key untuk vault '{vault_name}' di Vaultix:\n\n{key}\n\n"
+                "Simpan email ini di tempat aman. Recovery key ini hanya bisa dipakai "
+                "untuk reset password login vault, bukan untuk membuka file yang sudah "
+                "dienkripsi lewat Mode Encryption."
+            )
+            open_email_draft(subject, body)
+
+        btn_row = ctk.CTkFrame(box, fg_color="transparent")
+        btn_row.pack(pady=5)
+        ctk.CTkButton(btn_row, text="Salin", width=110, command=copy_key).pack(side="left", padx=5)
+        ctk.CTkButton(btn_row, text="Kirim ke Email", width=130, command=send_email).pack(side="left", padx=5)
+
+        ctk.CTkButton(
+            box, text="Saya Sudah Menyimpannya", width=200, fg_color="#2f6e3f", hover_color="#255a33",
+            command=box.destroy,
+        ).pack(pady=15)
+
+    def open_recovery_flow(self):
+        vault = self.get_active_vault()
+        if not vault.get("recovery_key_hash"):
+            messagebox.showinfo(
+                "Info",
+                f"Vault '{vault.get('name')}' belum punya recovery key. "
+                "Buat dulu lewat halaman Settings SEBELUM lupa password (tidak bisa dibuat "
+                "sekarang kalau sedang tidak bisa login).",
+            )
+            return
+
+        key = self.ask_password_dialog(
+            "Lupa Password - Masukkan Recovery Key",
+            f"Masukkan recovery key untuk vault '{vault.get('name')}':",
+        )
+        if key is None:
+            return
+        if not verify_recovery_key(vault, key):
+            messagebox.showerror("Error", "Recovery key salah.")
+            log_event(self.config_data, "Percobaan recovery key salah")
+            return
+
+        messagebox.showwarning(
+            "Recovery Key Benar",
+            "Recovery key benar. Anda akan diminta membuat password master BARU.\n\n"
+            "PENTING: kalau vault ini sebelumnya punya folder yang dienkripsi lewat "
+            "Mode Encryption dengan password LAMA, folder itu TIDAK akan bisa didekripsi "
+            "dengan password baru - password lama tetap wajib diingat khusus untuk itu.",
+        )
+        new_pw = self.ask_password_dialog(
+            "Buat Password Baru", "Buat password master baru (minimal 4 karakter):", confirm=True
+        )
+        if new_pw is None:
+            return
+        set_master_password(vault, new_pw)
+        save_config(self.config_data)
+        log_event(self.config_data, f"Password vault '{vault.get('name')}' direset lewat recovery key")
+        messagebox.showinfo("Sukses", "Password master berhasil direset.")
 
 
 def main():
