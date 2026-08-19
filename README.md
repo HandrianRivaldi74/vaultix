@@ -98,17 +98,17 @@ mudah ke paling kompleks:
 6. ⏸ **Windows Hello / Fingerprint / Face** — DITUNDA, dinonaktifkan
    sementara. Lihat penjelasan lengkap di bawah.
 7. ✅ **Mode Encryption terpisah** — selesai (lihat di bawah).
-8. ⬜ Screenshot/Recording Protection — **catatan penting**: hanya bisa
-   melindungi jendela Vaultix sendiri, TIDAK bisa mencegah screenshot
-   File Explorer asli. Baru berguna penuh kalau dipasangkan dengan file
-   browser custom di dalam aplikasi.
-9. ⬜ Decoy Vault — butuh Mode Encryption selesai dulu sebagai fondasi.
-10. ⬜ Security Key (FIDO2) — tahap lanjutan/eksperimental.
-11. ⬜ Mobile Remote Lock — **butuh infrastruktur terpisah** (backend
-    server, API, push notification, aplikasi mobile). Di luar cakupan
-    aplikasi desktop lokal ini.
-12. ⬜ Clipboard Protection — ditambahkan atas konfirmasi Anda, belum
-    dikerjakan.
+8. ✅ **Screenshot/Recording Protection** — selesai dengan batasan yang
+   sudah diketahui sejak awal (lihat di bawah): hanya melindungi jendela
+   Vaultix sendiri, TIDAK melindungi File Explorer asli.
+9. ✅ **Decoy Vault** — selesai dengan batasan yang perlu dipahami
+   (lihat di bawah): bukan perlindungan level forensik.
+10. ✅ **Security Key (FIDO2)** — selesai, ditandai **BETA** (lihat di
+    bawah). Belum diuji dengan hardware fisik sungguhan.
+11. ⏸ Mobile Remote Lock — **DITUNDA atas keputusan Anda**. Butuh
+    infrastruktur terpisah (backend server, API, push notification,
+    aplikasi mobile). Di luar cakupan aplikasi desktop lokal ini.
+12. ✅ **Clipboard Protection** — selesai (lihat di bawah).
 
 ## Fitur Baru: Security Activity Log
 
@@ -140,9 +140,9 @@ tidak berpura-pura menampilkan fitur yang belum ada.
   dari panjang & variasi karakter saat password dibuat/diganti.
 - **Auto Lock** — saat ini selalu "Nonaktif" (roadmap #4, belum
   tersedia).
-- **Clipboard Protection** — "Belum direncanakan". Ini muncul di contoh
-  dashboard yang Anda berikan tapi belum ada di daftar 11 fitur roadmap
-  — beri tahu kalau memang ingin ditambahkan sebagai fitur baru.
+- **Clipboard Protection** — awalnya "Belum direncanakan" karena tidak
+  ada di 11 fitur roadmap awal, kini sudah jadi fitur #12 dan berfungsi
+  (lihat "Fitur Baru: Clipboard Protection" di bawah).
 - **Folder** — daftar semua folder dengan ikon 🔒/🔓 sesuai statusnya
   (menggantikan konsep "Vaults" bernama di contoh Anda, karena Multiple
   Vault baru ada di roadmap #5).
@@ -434,10 +434,216 @@ halaman Encryption — ini aman, hanya memproses file `.vaultixenc` yang
 sempat kepotong, file yang memang belum sempat dienkripsi tidak
 diapa-apakan.
 
+## Fitur Baru: Screenshot & Screen-Recording Protection
+
+Toggle **global** (bukan per-vault/per-folder) di halaman Settings.
+Sesuai catatan feasibility yang sudah disampaikan sejak awal roadmap:
+
+**Yang dilindungi**: jendela Vaultix sendiri — daftar folder, dialog
+Recovery Key, dialog password/PIN, dan Riwayat Akses Folder. Jendela
+akan tampil **hitam/kosong** kalau ada yang mencoba screenshot,
+merekam layar, atau melakukan remote desktop/screen share saat jendela
+itu terbuka — tapi tetap terlihat normal untuk Anda yang melihat
+langsung di layar sendiri.
+
+**Yang TIDAK dilindungi**: isi folder asli yang dibuka lewat File
+Explorer Windows. Itu proses Windows terpisah yang tidak bisa
+dikendalikan dari aplikasi lain — baru bisa diatasi kalau suatu saat
+dibangun file browser custom di dalam Vaultix sendiri (bukan
+mengandalkan Explorer bawaan).
+
+**Detail teknis**: pakai Windows API `SetWindowDisplayAffinity` dengan
+flag `WDA_EXCLUDEFROMCAPTURE`. Windows tidak membedakan "screenshot"
+dan "perekaman layar" di level API ini — satu toggle mengamankan
+keduanya sekaligus. Butuh **Windows 10 versi 2004 (Mei 2020) ke atas**;
+di versi lebih lama API ini tidak tersedia dan proteksi tidak akan
+aktif (tidak ada error, cuma diam-diam tidak berfungsi).
+
+**Catatan penerapan**: proteksi berlaku untuk jendela baru yang dibuka
+SETELAH toggle diaktifkan (jendela utama langsung diterapkan seketika
+tanpa perlu restart). Dialog yang sudah terlanjur terbuka sebelum
+toggle dinyalakan tidak otomatis terlindungi sampai dibuka ulang.
+
+## Fitur Baru: Decoy Vault
+
+Diakses lewat halaman **Settings → Decoy Vault → "Aktifkan"**.
+
+**Cara kerja:** setiap vault bisa punya satu **Decoy Vault tertaut** —
+vault kedua yang tersembunyi total (tidak pernah muncul sebagai entri
+terpisah di dropdown vault). Begitu diaktifkan, cara membuka vault itu
+berubah:
+- Pilih vault dari dropdown → sekarang **selalu diminta password**
+  (sebelumnya langsung terbuka tanpa password untuk vault tanpa decoy).
+- Masukkan **password asli** → tampil folder asli seperti biasa.
+- Masukkan **password decoy** → tampil folder Decoy Vault (folder
+  "biasa saja" yang Anda siapkan sendiri) — dropdown tetap menampilkan
+  nama vault yang sama, tidak ada tanda visual bahwa yang terbuka
+  adalah vault yang berbeda.
+- Password salah (bukan keduanya) → ditolak seperti biasa.
+
+**Mengisi folder ke Decoy Vault**: pilih vault yang sudah diaktifkan
+decoy-nya, masukkan password DECOY (bukan asli), lalu tambahkan folder
+seperti biasa di halaman Folders — Decoy Vault adalah vault penuh
+dengan segala fiturnya sendiri (folder, auto-lock, dst), bukan sekadar
+daftar nama kosong.
+
+**⚠ Batasan penting - baca sebelum mengaktifkan:**
+- **Bukan perlindungan level forensik.** Kalau seseorang membuka file
+  `%USERPROFILE%\.vaultix\config.json` secara langsung dan memahami
+  strukturnya, keberadaan Decoy Vault dan tautannya ke vault aslinya
+  masih terlihat di data mentah. Ini beda dengan hidden volume
+  VeraCrypt yang didesain supaya keberadaannya secara statistik tidak
+  terdeteksi bahkan dari analisis file mentah.
+- **Ada asimetri perilaku yang bisa jadi petunjuk**: vault dengan decoy
+  selalu minta password saat dipilih, sedangkan vault tanpa decoy
+  langsung terbuka. Orang yang cukup teliti membandingkan perilaku
+  antar-vault berpotensi curiga ada sesuatu yang disembunyikan.
+- Fitur ini paling cocok untuk skenario ringan seperti "diminta
+  menunjukkan isi vault ke orang lain sebentar", bukan untuk melawan
+  investigasi forensik digital yang serius.
+
+**Kelola/Hapus**: dari Settings, vault yang sudah punya decoy akan
+menampilkan tombol "Kelola" — bisa ganti password decoy atau
+menghapusnya sepenuhnya. Menghapus vault utama yang punya decoy
+tertaut akan otomatis ikut menghapus decoy-nya juga (dengan
+peringatan).
+
+## Fitur Baru: Security Key (FIDO2) — BETA
+
+Diakses lewat halaman **Settings → Security Key (FIDO2) → "Daftarkan
+Kunci"** (hanya muncul kalau package `fido2` sudah terinstall).
+
+**Beda pendekatan dari Windows Hello (yang gagal kemarin)**: fitur ini
+pakai package resmi Yubico `python-fido2`, yang **berkomunikasi
+langsung ke perangkat FIDO2 lewat USB HID** — tidak lewat WinRT/COM
+sama sekali, jadi tidak berisiko masalah apartment/interop yang sama
+seperti kasus Windows Hello.
+
+**Kenapa tetap ditandai BETA**: interaksi hardware fisik (harus
+disentuh tombolnya) dan variasi implementasi antar merek kunci
+keamanan (YubiKey, SoloKey, dll) belum bisa saya uji menyeluruh tanpa
+hardware asli di tangan. Struktur pemanggilan API `python-fido2` sudah
+divalidasi berfungsi (register_begin/authenticate_begin teruji jalan),
+tapi bagian yang butuh sentuhan fisik ke device sungguhan baru akan
+teruji saat Anda coba langsung.
+
+**Cara kerja:**
+- Colokkan kunci keamanan FIDO2 ke USB, klik "Daftarkan Kunci",
+  verifikasi password vault dulu, lalu sentuh tombol fisik di kunci
+  saat diminta.
+- Kredensial yang tersimpan adalah **kunci publik & credential ID**
+  saja (standar WebAuthn/FIDO2) — kunci privatnya tetap di dalam
+  hardware, tidak pernah keluar/tersimpan di Vaultix.
+- Setelah terdaftar, dialog verifikasi menawarkan "pakai Security Key?"
+  sebelum jatuh ke password/PIN biasa — sama seperti pola Windows Hello.
+- Semua operasi dibungkus try/except penuh dan berjalan di background
+  thread dengan dialog progress ("Sentuh kunci keamanan Anda
+  sekarang...") - kalau gagal atau timeout, aplikasi TIDAK crash, hanya
+  menampilkan pesan gagal dan Anda tetap bisa pakai password/PIN.
+
+**Dependensi baru**: `pip install fido2`
+
+## Fitur Baru: Clipboard Protection
+
+Toggle **global** di halaman Settings, **aktif secara default**. Dua
+lapis perlindungan untuk teks sensitif yang disalin dari Vaultix
+(saat ini dipakai di tombol "Salin" pada dialog Recovery Key):
+
+1. **Auto-clear** — clipboard otomatis dibersihkan beberapa detik
+   setelah disalin (default 30 detik, bisa diubah lewat tombol
+   "Konfigurasi"). Kalau Anda sudah menyalin sesuatu yang lain sebelum
+   waktunya habis, Vaultix tidak akan menghapusnya — hanya membersihkan
+   kalau isi clipboard masih sama persis dengan yang disalin dari
+   Vaultix.
+2. **Dikecualikan dari Clipboard History & Cloud Sync Windows** — pakai
+   format clipboard khusus yang didukung Windows 10+
+   (`CanIncludeInClipboardHistory`, `CanUploadToCloudClipboard`,
+   `ExcludeClipboardContentFromMonitorProcessing` — pola yang sama
+   dipakai aplikasi password manager lain) supaya data sensitif tidak
+   nyantol di riwayat Win+V atau tersinkron ke perangkat lain lewat
+   Cloud Clipboard.
+
+**Kenapa lebih rendah risiko dari kasus Windows Hello**: implementasi
+ini pakai Win32 API klasik (`OpenClipboard`/`SetClipboardData` lewat
+`ctypes`), bukan WinRT/COM — pola yang jauh lebih sederhana dan sudah
+terbukti stabil di banyak aplikasi lain, bukan API yang butuh
+interop/apartment threading rumit seperti `UserConsentVerifier`.
+
+## Perbaikan Penting #10 (redesign tampilan — lebih modern)
+
+Penyegaran visual menyeluruh, tanpa mengubah fungsi apa pun:
+
+- **Tema warna baru** — beralih dari tema biru generik bawaan CTk ke
+  tema `dark-blue` yang lebih premium, plus warna aksen kustom yang
+  dipakai konsisten di seluruh aplikasi (sidebar aktif, badge, seleksi
+  tabel).
+- **Status badge berbentuk pill** — Dashboard sekarang menampilkan
+  status (Vault Security, Encryption, Password, dst) sebagai badge
+  bulat berwarna, bukan lagi cuma emoji + teks polos.
+- **Kartu bersudut lebih membulat** (`corner_radius`) di semua halaman
+  — Folders, Encryption, Activity, Settings — untuk kesan yang lebih
+  lembut dan modern.
+- **Sidebar dirombak**: ada branding kecil ("secure vault manager"),
+  garis pemisah antar-bagian, ikon di tiap menu navigasi, dan menu
+  yang sedang aktif di-highlight dengan warna aksen (bukan abu-abu
+  polos seperti sebelumnya).
+- **Header per halaman** distandarkan: ikon besar + judul ukuran
+  seragam di semua halaman (Folders, Encryption, Dashboard, Activity,
+  Settings).
+- Treeview (tabel daftar folder & log) memakai warna seleksi yang
+  senada dengan aksen baru, baris sedikit lebih lega.
+
+## Fitur Baru: Pilihan Bahasa (Indonesia / English)
+
+Dropdown **"BAHASA / LANGUAGE"** di sidebar, tepat di atas pemilih tema.
+
+**Cakupan saat ini**: sidebar (branding, navigasi, label), header setiap
+halaman (Folders/Encryption/Dashboard/Activity/Settings), tombol aksi
+utama di halaman Folders (Sembunyikan/Kunci/Gabungan, dll), header
+tabel, dan tombol Refresh. Ini bagian yang paling sering terlihat
+sehari-hari.
+
+**Belum diterjemahkan** (masih Bahasa Indonesia untuk saat ini):
+deskripsi panjang di kartu Settings, isi dialog (Recovery Key, PIN,
+Auto Lock, Decoy Vault, dll), pesan error/konfirmasi, dan Security
+Activity Log. Menerjemahkan seluruhnya adalah pekerjaan besar
+tersendiri (ratusan string tersebar di banyak dialog) - beri tahu
+kalau ingin dilanjutkan ke bagian-bagian tertentu.
+
+**Cara kerja teknis**: pilihan bahasa disimpan per-aplikasi (bukan
+per-vault) di `config.json`. Karena teks widget CustomTkinter tidak
+otomatis berubah sendiri, mengganti bahasa akan **membangun ulang
+seluruh tampilan** secara instan (tanpa perlu restart aplikasi),
+sambil tetap berada di halaman yang sama.
+
+## Perbaikan Penting #11 (halaman Encryption tidak refresh otomatis setelah proses)
+
+Bug: setelah enkripsi/dekripsi selesai, status folder di halaman
+Encryption tidak langsung berubah - baru terlihat kalau pindah halaman
+lalu balik lagi.
+
+**Penyebab**: `run_bulk_action` (dipakai semua aksi folder, termasuk
+enkripsi) bersifat **asynchronous** - dia menjadwalkan proses di
+background thread lalu langsung `return`, tidak menunggu sampai
+prosesnya benar-benar selesai. Kode lama memanggil refresh halaman
+Encryption tepat setelah `run_bulk_action(...)` dipanggil, padahal
+proses aslinya (yang berjalan di thread lain) belum tentu selesai saat
+baris itu dieksekusi - jadi refresh terjadi memakai data status yang
+masih lama.
+
+**Perbaikan**: `run_bulk_action` sekarang menerima parameter
+`on_complete` (callback) yang baru dipanggil **setelah proses
+benar-benar tuntas** (di dalam handler "done" yang sama dengan tempat
+`refresh_list()` asli dipanggil). `action_encrypt`/`action_decrypt`
+sekarang memakai ini untuk merefresh halaman Encryption di waktu yang
+tepat. Aksi lain (Sembunyikan/Kunci/Gabungan) tidak terpengaruh bug ini
+karena mereka hanya perlu me-refresh halaman Folders yang sedang aktif
+sendiri, yang sudah otomatis benar dari awal.
+
 ## Dependensi
 
 ```
-pip install customtkinter pywin32 cryptography argon2-cffi
+pip install customtkinter pywin32 cryptography argon2-cffi fido2
 ```
 
 - `customtkinter` **wajib** — dipakai untuk seluruh tampilan aplikasi.
@@ -446,6 +652,9 @@ pip install customtkinter pywin32 cryptography argon2-cffi
   install dulu, sisa aplikasi tetap jalan normal.
 - `pywin32` opsional, hanya dipakai fitur "Riwayat Akses Folder" bagian
   Recent Items. Tanpa ini aplikasi tetap jalan normal.
+- `fido2` opsional, hanya dipakai fitur Security Key (BETA). Tanpa ini,
+  kartu Security Key di Settings menampilkan pesan install saja, sisa
+  aplikasi tetap jalan normal.
 - `winsdk` **tidak diperlukan lagi untuk saat ini** — fitur Windows
   Hello yang memakainya sedang dinonaktifkan (lihat bagian di atas).
   Boleh tetap diinstall kalau sudah terlanjur, tidak masalah.
@@ -461,7 +670,7 @@ python main.py
 ## Membuat file .exe standalone
 
 ```
-pip install pyinstaller customtkinter pywin32 cryptography argon2-cffi
+pip install pyinstaller customtkinter pywin32 cryptography argon2-cffi fido2
 pyinstaller --onefile --noconsole --name "Vaultix" main.py
 ```
 

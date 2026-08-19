@@ -64,8 +64,81 @@ try:
 except ImportError:
     HAS_CRYPTO = False
 
+try:
+    from fido2.hid import CtapHidDevice
+    from fido2.client import Fido2Client, DefaultClientDataCollector, UserInteraction
+    from fido2.server import Fido2Server
+    from fido2.webauthn import PublicKeyCredentialRpEntity, PublicKeyCredentialUserEntity, AttestedCredentialData
+    HAS_FIDO2 = True
+except ImportError:
+    HAS_FIDO2 = False
+
 APP_DIR = os.path.join(os.path.expanduser("~"), ".vaultix")
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
+
+# -- palet warna kustom untuk elemen yang butuh styling manual (badge, sidebar, dll) --
+ACCENT = ("#2C5FBF", "#4C8CFF")          # (light, dark) - senada dengan tema "dark-blue"
+ACCENT_SOFT = ("#DCE8FF", "#1B2A4A")     # background lembut untuk highlight/active state
+CARD_RADIUS = 14
+BADGE_COLORS = {
+    "green": {"bg": ("#DCFCE7", "#123522"), "fg": ("#15803D", "#4ADE80")},
+    "yellow": {"bg": ("#FEF9C3", "#3F3410"), "fg": ("#A16207", "#FDE047")},
+    "red": {"bg": ("#FEE2E2", "#3A1414"), "fg": ("#B91C1C", "#F87171")},
+}
+
+# -- terjemahan UI utama (sidebar, header halaman, tombol aksi, header tabel) --
+# Cakupan saat ini: chrome/navigasi utama. Deskripsi panjang & dialog detail
+# masih Bahasa Indonesia - bisa ditambah bertahap kalau dibutuhkan.
+TRANSLATIONS = {
+    "id": {
+        "app_tagline": "secure vault manager",
+        "vault_active": "VAULT AKTIF",
+        "nav_folders": "Folders", "nav_encryption": "Encryption",
+        "nav_dashboard": "Dashboard", "nav_activity": "Activity", "nav_settings": "Settings",
+        "theme_label": "TEMA", "language_label": "BAHASA",
+        "btn_add_vault": "+ Vault", "btn_rename_vault": "Ganti Nama",
+        "folders_title": "Daftar Folder",
+        "btn_select_all": "Pilih Semua", "btn_deselect_all": "Batal Pilih Semua",
+        "btn_add_folder": "+ Tambah Folder", "btn_remove_folder": "Hapus dari Daftar",
+        "col_folder": "Folder", "col_display_status": "Status Tampilan",
+        "col_lock_status": "Status Kunci", "col_encryption_status": "Status Enkripsi",
+        "section_hide": "👁  Sembunyikan (tanpa password)",
+        "btn_hide": "Sembunyikan", "btn_show": "Tampilkan",
+        "section_lock": "🔒  Kunci (butuh password)",
+        "btn_lock": "Kunci", "btn_unlock": "Buka Kunci",
+        "section_combo": "⚡  Gabungan (butuh password)",
+        "btn_lock_hide": "Kunci & Sembunyikan", "btn_unlock_show": "Buka Kunci & Tampilkan",
+        "encryption_title": "🔐 Encryption",
+        "dashboard_title": "Security Status",
+        "activity_title": "🛡 Activity",
+        "settings_title": "⚙ Settings",
+        "btn_refresh": "↻ Refresh", "btn_save": "Simpan", "btn_cancel": "Batal", "btn_ok": "OK",
+    },
+    "en": {
+        "app_tagline": "secure vault manager",
+        "vault_active": "ACTIVE VAULT",
+        "nav_folders": "Folders", "nav_encryption": "Encryption",
+        "nav_dashboard": "Dashboard", "nav_activity": "Activity", "nav_settings": "Settings",
+        "theme_label": "THEME", "language_label": "LANGUAGE",
+        "btn_add_vault": "+ Vault", "btn_rename_vault": "Rename",
+        "folders_title": "Folder List",
+        "btn_select_all": "Select All", "btn_deselect_all": "Deselect All",
+        "btn_add_folder": "+ Add Folder", "btn_remove_folder": "Remove from List",
+        "col_folder": "Folder", "col_display_status": "Visibility",
+        "col_lock_status": "Lock Status", "col_encryption_status": "Encryption Status",
+        "section_hide": "👁  Hide (no password)",
+        "btn_hide": "Hide", "btn_show": "Show",
+        "section_lock": "🔒  Lock (password required)",
+        "btn_lock": "Lock", "btn_unlock": "Unlock",
+        "section_combo": "⚡  Combined (password required)",
+        "btn_lock_hide": "Lock & Hide", "btn_unlock_show": "Unlock & Show",
+        "encryption_title": "🔐 Encryption",
+        "dashboard_title": "Security Status",
+        "activity_title": "🛡 Activity",
+        "settings_title": "⚙ Settings",
+        "btn_refresh": "↻ Refresh", "btn_save": "Save", "btn_cancel": "Cancel", "btn_ok": "OK",
+    },
+}
 
 FILE_ATTRIBUTE_HIDDEN = 0x2
 FILE_ATTRIBUTE_SYSTEM = 0x4
@@ -106,7 +179,10 @@ def new_vault_dict(name: str) -> dict:
         "salt": None, "password_hash": None, "password_strength": None,
         "pin_enabled": False, "pin_hash": None, "pin_salt": None,
         "windows_hello_enabled": False,
+        "security_key_credential": None,  # kredensial FIDO2 (hex), BETA/eksperimental
         "recovery_key_hash": None, "recovery_key_salt": None, "recovery_key_created_at": None,
+        "decoy_vault_id": None,  # kalau diisi, vault ini punya Decoy Vault tertaut
+        "is_decoy": False,  # True kalau vault ini SENDIRI adalah decoy (tersembunyi dari dropdown)
         "folders": [],
         "auto_lock_enabled": False, "auto_lock_minutes": 5,
         "auto_lock_triggers": {"inactive": True, "lock": True, "focus_loss": False},
@@ -119,7 +195,8 @@ def load_config():
     if not os.path.exists(CONFIG_PATH):
         vault_id = secrets.token_hex(4)
         return {
-            "theme": "System", "activity_log": [],
+            "theme": "System", "activity_log": [], "screenshot_protection_enabled": False,
+            "clipboard_protection_enabled": True, "clipboard_auto_clear_seconds": 30, "language": "id",
             "vaults": {vault_id: new_vault_dict("Personal")},
             "active_vault": vault_id,
         }
@@ -158,6 +235,10 @@ def load_config():
 
     data.setdefault("theme", "System")
     data.setdefault("activity_log", [])
+    data.setdefault("screenshot_protection_enabled", False)
+    data.setdefault("clipboard_protection_enabled", True)
+    data.setdefault("clipboard_auto_clear_seconds", 30)
+    data.setdefault("language", "id")
     if not data.get("vaults"):
         vault_id = secrets.token_hex(4)
         data["vaults"] = {vault_id: new_vault_dict("Personal")}
@@ -168,9 +249,12 @@ def load_config():
         vault.setdefault("folders", [])
         vault.setdefault("pin_enabled", False)
         vault.setdefault("windows_hello_enabled", False)
+        vault.setdefault("security_key_credential", None)
         vault.setdefault("recovery_key_hash", None)
         vault.setdefault("recovery_key_salt", None)
         vault.setdefault("recovery_key_created_at", None)
+        vault.setdefault("decoy_vault_id", None)
+        vault.setdefault("is_decoy", False)
         vault.setdefault("auto_lock_enabled", False)
         vault.setdefault("auto_lock_minutes", 5)
         vault.setdefault("auto_lock_triggers", {"inactive": True, "lock": True, "focus_loss": False})
@@ -342,6 +426,203 @@ def is_session_locked() -> bool:
             ctypes.windll.kernel32.CloseHandle(hproc)
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Screenshot/Screen-Recording Protection (SetWindowDisplayAffinity)
+# ---------------------------------------------------------------------------
+#
+# CATATAN FEASIBILITY PENTING: ini HANYA melindungi jendela Vaultix sendiri
+# (daftar folder, Recovery Key, dialog password, dsb) - TIDAK BISA
+# melindungi isi folder asli yang dibuka lewat File Explorer, karena itu
+# proses Windows terpisah yang tidak kita kendalikan. Bukan proteksi
+# per-folder, melainkan proteksi untuk jendela aplikasi Vaultix.
+#
+# Windows tidak membedakan API antara "screenshot" dan "perekaman layar" -
+# WDA_EXCLUDEFROMCAPTURE memblokir keduanya sekaligus (termasuk saat
+# remote desktop/screen share): jendela akan tampil hitam/kosong di hasil
+# tangkapan, tapi tetap normal buat yang melihat langsung di layarnya.
+# Butuh Windows 10 versi 2004 (Mei 2020) ke atas.
+
+WDA_NONE = 0x0
+WDA_EXCLUDEFROMCAPTURE = 0x11
+
+
+def set_window_capture_protection(hwnd, enable: bool) -> bool:
+    if not IS_WINDOWS or not hwnd:
+        return False
+    try:
+        affinity = WDA_EXCLUDEFROMCAPTURE if enable else WDA_NONE
+        return bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, affinity))
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Clipboard Protection (fitur #12)
+# ---------------------------------------------------------------------------
+#
+# Dua lapis perlindungan untuk teks sensitif yang disalin dari Vaultix
+# (mis. Recovery Key):
+# 1. Salin dengan format clipboard khusus Windows yang mengecualikan data
+#    dari Clipboard History (Win+V) dan Cloud Clipboard sync - dokumentasi
+#    Microsoft menyebut ini "CanIncludeInClipboardHistory" dan
+#    "CanUploadToCloudClipboard" (dipakai juga oleh aplikasi password
+#    manager lain). Pakai Win32 API klasik langsung (OpenClipboard/
+#    SetClipboardData), BUKAN WinRT/COM - risikonya jauh lebih rendah
+#    daripada kasus Windows Hello.
+# 2. Auto-clear: clipboard dibersihkan otomatis beberapa detik setelah
+#    disalin (kalau isinya masih sama - tidak akan menghapus kalau user
+#    sudah menyalin sesuatu yang lain di antaranya).
+
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+
+
+def copy_to_clipboard_protected(text: str, exclude_from_history: bool = True) -> bool:
+    if not IS_WINDOWS:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        if not user32.OpenClipboard(None):
+            return False
+        try:
+            user32.EmptyClipboard()
+
+            data = text.encode("utf-16-le") + b"\x00\x00"
+            h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+            if not h_mem:
+                return False
+            ptr = kernel32.GlobalLock(h_mem)
+            ctypes.memmove(ptr, data, len(data))
+            kernel32.GlobalUnlock(h_mem)
+            if not user32.SetClipboardData(CF_UNICODETEXT, h_mem):
+                return False
+
+            if exclude_from_history:
+                for fmt_name in (
+                    "ExcludeClipboardContentFromMonitorProcessing",
+                    "CanIncludeInClipboardHistory",
+                    "CanUploadToCloudClipboard",
+                ):
+                    try:
+                        fmt = user32.RegisterClipboardFormatW(fmt_name)
+                        if not fmt:
+                            continue
+                        val = (0).to_bytes(4, "little")  # DWORD 0 = tidak diizinkan
+                        h_mem2 = kernel32.GlobalAlloc(GMEM_MOVEABLE, 4)
+                        if h_mem2:
+                            ptr2 = kernel32.GlobalLock(h_mem2)
+                            ctypes.memmove(ptr2, val, 4)
+                            kernel32.GlobalUnlock(h_mem2)
+                            user32.SetClipboardData(fmt, h_mem2)
+                    except Exception:
+                        continue  # satu format gagal tidak menggagalkan yang lain
+            return True
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Security Key (FIDO2) - STATUS: BETA/EKSPERIMENTAL
+# ---------------------------------------------------------------------------
+#
+# Beda dari Windows Hello (yang gagal karena butuh interop WinRT tingkat
+# rendah): fitur ini pakai package resmi Yubico 'python-fido2', yang
+# berkomunikasi LANGSUNG ke perangkat FIDO2 lewat USB HID - tidak lewat
+# WinRT/COM sama sekali, jadi tidak berisiko masalah apartment/interop
+# yang sama seperti kasus Windows Hello. TAPI tetap ditandai BETA karena
+# interaksi hardware fisik (harus disentuh) dan variasi antar merek kunci
+# keamanan belum bisa diuji menyeluruh tanpa hardware asli.
+#
+# Semua fungsi di bawah dibungkus try/except penuh dan TIDAK PERNAH
+# membuat aplikasi crash walau kunci keamanan berperilaku di luar dugaan -
+# paling buruk hanya menampilkan pesan gagal.
+
+FIDO2_RP_ID = "vaultix.local"
+FIDO2_ORIGIN = "https://vaultix.local"  # murni identitas kriptografis lokal, tidak pernah diakses via internet
+
+
+def list_fido2_devices():
+    if not HAS_FIDO2 or not IS_WINDOWS:
+        return []
+    try:
+        return list(CtapHidDevice.list_devices())
+    except Exception:
+        return []
+
+
+if HAS_FIDO2:
+    class _SilentFido2Interaction(UserInteraction):
+        """User cukup menyentuh tombol fisik di kunci keamanan - tidak ada
+        prompt PIN/UV tambahan yang kita minta di level ini."""
+        def prompt_up(self):
+            pass
+
+        def request_pin(self, permissions, rd_id):
+            return None
+
+        def request_uv(self, permissions, rd_id):
+            return True
+
+
+def _make_fido2_client(device):
+    collector = DefaultClientDataCollector(FIDO2_ORIGIN)
+    return Fido2Client(device, collector, user_interaction=_SilentFido2Interaction())
+
+
+def register_security_key(vault_name: str):
+    """Registrasi kunci keamanan FIDO2 baru untuk sebuah vault. BLOCKING -
+    user harus menyentuh kunci keamanan fisik. Mengembalikan
+    (berhasil: bool, credential_hex_atau_pesan_error: str)."""
+    if not HAS_FIDO2:
+        return False, "Package 'fido2' belum terinstall. Jalankan: pip install fido2"
+    if not IS_WINDOWS:
+        return False, "Fitur ini hanya tersedia di Windows."
+    try:
+        devices = list_fido2_devices()
+        if not devices:
+            return False, "Tidak ada kunci keamanan FIDO2 terdeteksi. Pastikan sudah dicolok ke port USB."
+        device = devices[0]
+        client = _make_fido2_client(device)
+        server = Fido2Server(PublicKeyCredentialRpEntity(id=FIDO2_RP_ID, name="Vaultix"))
+        user = PublicKeyCredentialUserEntity(
+            id=secrets.token_bytes(16), name=vault_name, display_name=vault_name,
+        )
+        create_options, state = server.register_begin(user, user_verification="discouraged")
+        result = client.make_credential(create_options.public_key)
+        auth_data = server.register_complete(state, result)
+        return True, auth_data.credential_data.hex()
+    except Exception as e:
+        return False, f"Gagal registrasi kunci keamanan: {e}"
+
+
+def verify_security_key(credential_hex: str):
+    """Minta user menyentuh kunci keamanan untuk verifikasi. BLOCKING.
+    Mengembalikan (berhasil: bool, pesan: str)."""
+    if not HAS_FIDO2:
+        return False, "Package 'fido2' belum terinstall."
+    if not IS_WINDOWS:
+        return False, "Fitur ini hanya tersedia di Windows."
+    try:
+        devices = list_fido2_devices()
+        if not devices:
+            return False, "Tidak ada kunci keamanan FIDO2 terdeteksi. Pastikan sudah dicolok ke port USB."
+        device = devices[0]
+        cred_data = AttestedCredentialData(bytes.fromhex(credential_hex))
+        client = _make_fido2_client(device)
+        server = Fido2Server(PublicKeyCredentialRpEntity(id=FIDO2_RP_ID, name="Vaultix"))
+        request_options, state = server.authenticate_begin(credentials=[cred_data])
+        result = client.get_assertion(request_options.public_key)
+        response = result.get_response(0)
+        server.authenticate_complete(state, [cred_data], response)
+        return True, "Berhasil diverifikasi."
+    except Exception as e:
+        return False, f"Verifikasi gagal (kunci keamanan mungkin tidak cocok, atau tidak disentuh tepat waktu): {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -772,10 +1053,12 @@ class VaultixApp(ctk.CTk):
         self.checked_paths = set()
         self._hello_available = None
         self.paths_in_progress = set()  # folder yang sedang diproses aksi apa pun - dilewati Auto Lock
+        self.current_view_key = "folders"
+        self._active_display_name_override = None  # nama yang ditampilkan di dropdown saat masuk decoy vault
 
         ctk.set_appearance_mode(self.config_data.get("theme", "System"))
 
-        WIDTH, HEIGHT = 1020, 620
+        WIDTH, HEIGHT = 1060, 640
         self.geometry(f"{WIDTH}x{HEIGHT}")
         self.minsize(WIDTH, HEIGHT)
         center_window(self, WIDTH, HEIGHT)
@@ -793,6 +1076,133 @@ class VaultixApp(ctk.CTk):
         self.bind("<FocusOut>", self._on_focus_out)
         self._last_lock_state = False
         self._poll_idle()
+        self.protect_window(self)
+
+    # -- screenshot/screen-recording protection ------------------------------
+    def protect_window(self, window):
+        """Terapkan proteksi capture ke `window` KALAU toggle-nya aktif.
+        Aman dipanggil untuk window mana pun (main window atau Toplevel) -
+        tidak melakukan apa-apa kalau proteksi nonaktif atau bukan Windows."""
+        if not self.config_data.get("screenshot_protection_enabled"):
+            return
+        try:
+            hwnd = window.winfo_id()
+            set_window_capture_protection(hwnd, True)
+        except Exception:
+            pass
+
+    def _toggle_screenshot_protection(self):
+        enabled = self.screenshot_protection_switch_var.get()
+        self.config_data["screenshot_protection_enabled"] = enabled
+        save_config(self.config_data)
+        log_event(self.config_data, f"Screenshot Protection {'diaktifkan' if enabled else 'dinonaktifkan'}")
+        # Terapkan/lepas langsung dari jendela utama tanpa perlu restart
+        try:
+            hwnd = self.winfo_id()
+            set_window_capture_protection(hwnd, enabled)
+        except Exception:
+            pass
+
+    # -- clipboard protection -------------------------------------------------
+    def copy_sensitive_to_clipboard(self, text: str):
+        """Salin teks sensitif ke clipboard. Kalau Clipboard Protection aktif:
+        pakai format khusus supaya dikecualikan dari Clipboard History/Cloud
+        Sync Windows, dan jadwalkan penghapusan otomatis setelah beberapa detik."""
+        protected = self.config_data.get("clipboard_protection_enabled", True)
+        ok = False
+        if protected and IS_WINDOWS:
+            ok = copy_to_clipboard_protected(text, exclude_from_history=True)
+        if not ok:
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(text)
+            except Exception:
+                pass
+        if protected:
+            seconds = self.config_data.get("clipboard_auto_clear_seconds", 30)
+            self._schedule_clipboard_clear(text, seconds * 1000)
+
+    def _schedule_clipboard_clear(self, expected_text: str, delay_ms: int):
+        def clear_if_unchanged():
+            try:
+                current = self.clipboard_get()
+            except Exception:
+                current = None
+            if current == expected_text:
+                try:
+                    self.clipboard_clear()
+                except Exception:
+                    pass
+        self.after(delay_ms, clear_if_unchanged)
+
+    def _toggle_clipboard_protection(self):
+        enabled = self.clipboard_protection_switch_var.get()
+        self.config_data["clipboard_protection_enabled"] = enabled
+        save_config(self.config_data)
+        log_event(self.config_data, f"Clipboard Protection {'diaktifkan' if enabled else 'dinonaktifkan'}")
+
+    def open_clipboard_protection_settings(self):
+        box = ctk.CTkToplevel(self)
+        box.title("Konfigurasi Clipboard Protection")
+        W, H = 380, 220
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.resizable(False, False)
+        self.protect_window(box)
+
+        ctk.CTkLabel(
+            box, text="Berapa detik sebelum clipboard dibersihkan otomatis\n"
+                      "setelah menyalin data sensitif (mis. Recovery Key)?",
+            wraplength=340, justify="left",
+        ).pack(padx=20, pady=(20, 10))
+
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(pady=5)
+        seconds_entry = ctk.CTkEntry(row, width=80)
+        seconds_entry.insert(0, str(self.config_data.get("clipboard_auto_clear_seconds", 30)))
+        seconds_entry.pack(side="left", padx=5)
+        ctk.CTkLabel(row, text="detik").pack(side="left")
+
+        def save():
+            try:
+                seconds = int(seconds_entry.get())
+                if seconds < 5:
+                    raise ValueError
+            except ValueError:
+                messagebox.showerror("Error", "Masukkan angka bulat minimal 5 detik.", parent=box)
+                return
+            self.config_data["clipboard_auto_clear_seconds"] = seconds
+            save_config(self.config_data)
+            log_event(self.config_data, f"Durasi auto-clear clipboard diubah jadi {seconds} detik")
+            box.destroy()
+
+        ctk.CTkButton(box, text="Simpan", command=save).pack(pady=15)
+
+    # -- bahasa (i18n) --------------------------------------------------------
+    def tr(self, key: str) -> str:
+        lang = self.config_data.get("language", "id")
+        return TRANSLATIONS.get(lang, TRANSLATIONS["id"]).get(key, TRANSLATIONS["id"].get(key, key))
+
+    def on_language_change(self, value):
+        lang_code = "en" if value == "English" else "id"
+        if lang_code == self.config_data.get("language", "id"):
+            return
+        self.config_data["language"] = lang_code
+        save_config(self.config_data)
+        self.rebuild_ui()
+
+    def rebuild_ui(self):
+        """Bangun ulang seluruh UI dari nol - dipakai saat bahasa diganti,
+        karena teks widget CTk tidak otomatis berubah sendiri."""
+        active_view = getattr(self, "current_view_key", "folders")
+        for widget in self.winfo_children():
+            widget.destroy()
+        self.build_ui()
+        self.apply_treeview_style()
+        self.refresh_list()
+        self.show_view(active_view)
 
     # -- manajemen vault -----------------------------------------------------
     def get_active_vault(self) -> dict:
@@ -812,13 +1222,15 @@ class VaultixApp(ctk.CTk):
             f"Windows Hello vault '{vault.get('name')}' {'diaktifkan' if vault['windows_hello_enabled'] else 'dinonaktifkan'}",
         )
 
-    def switch_vault(self, vault_id: str):
-        if vault_id == self.config_data.get("active_vault"):
+    def switch_vault(self, vault_id: str, display_name_override: str = None):
+        if vault_id == self.config_data.get("active_vault") and display_name_override == self._active_display_name_override:
             return
         self.config_data["active_vault"] = vault_id
+        self._active_display_name_override = display_name_override
         save_config(self.config_data)
         self.checked_paths = set()
-        log_event(self.config_data, f"Berpindah ke vault: {self.get_active_vault().get('name')}")
+        shown_name = display_name_override or self.get_active_vault().get("name")
+        log_event(self.config_data, f"Berpindah ke vault: {shown_name}")
         self._refresh_vault_switcher()
         self.refresh_list()
         if hasattr(self, "views"):
@@ -892,38 +1304,80 @@ class VaultixApp(ctk.CTk):
         ctk.CTkButton(box, text="Simpan", command=save).pack(pady=15)
 
     def delete_active_vault(self):
-        if len(self.config_data["vaults"]) <= 1:
+        visible_count = sum(1 for v in self.config_data["vaults"].values() if not v.get("is_decoy"))
+        if visible_count <= 1:
             messagebox.showwarning("Info", "Tidak bisa menghapus vault terakhir - minimal harus ada 1 vault.")
             return
         vault = self.get_active_vault()
         if not self.ask_master_password(f"Verifikasi Password Vault '{vault.get('name')}'"):
             return
+        linked_decoy_id = vault.get("decoy_vault_id")
+        extra_warning = "\n\nVault ini punya Decoy Vault tertaut - decoy-nya akan ikut terhapus." if linked_decoy_id else ""
         if not messagebox.askyesno(
             "Konfirmasi", f"Hapus vault '{vault.get('name')}' dari daftar Vaultix?\n\n"
             "Folder yang masih dalam status tersembunyi/terkunci di vault ini "
-            "TIDAK akan otomatis dibuka - pastikan sudah dibuka dulu sebelum menghapus vault.",
+            "TIDAK akan otomatis dibuka - pastikan sudah dibuka dulu sebelum menghapus vault."
+            + extra_warning,
         ):
             return
         vault_id = self.config_data["active_vault"]
         vault_name = vault.get("name")
+        if linked_decoy_id and linked_decoy_id in self.config_data["vaults"]:
+            del self.config_data["vaults"][linked_decoy_id]
+        if vault.get("is_decoy"):  # kalau yang dihapus justru decoy-nya sendiri, bersihkan tautan di vault depan
+            for v in self.config_data["vaults"].values():
+                if v.get("decoy_vault_id") == vault_id:
+                    v["decoy_vault_id"] = None
         del self.config_data["vaults"][vault_id]
-        self.config_data["active_vault"] = next(iter(self.config_data["vaults"]))
+        visible_ids = [vid for vid, v in self.config_data["vaults"].items() if not v.get("is_decoy")]
+        self.config_data["active_vault"] = visible_ids[0] if visible_ids else next(iter(self.config_data["vaults"]))
+        self._active_display_name_override = None
         save_config(self.config_data)
         log_event(self.config_data, f"Vault dihapus dari daftar: {vault_name}")
         self.switch_vault(self.config_data["active_vault"])
 
     def _refresh_vault_switcher(self):
-        names = [v["name"] for v in self.config_data["vaults"].values()]
-        ids = list(self.config_data["vaults"].keys())
+        visible = {vid: v for vid, v in self.config_data["vaults"].items() if not v.get("is_decoy")}
+        names = [v["name"] for v in visible.values()]
+        ids = list(visible.keys())
         self._vault_id_by_name = dict(zip(names, ids))
         self.vault_menu.configure(values=names)
-        active_name = self.get_active_vault().get("name")
-        self.vault_menu.set(active_name)
+        display_name = self._active_display_name_override or self.get_active_vault().get("name")
+        self.vault_menu.set(display_name)
 
     def _on_vault_menu_select(self, name):
         vault_id = self._vault_id_by_name.get(name)
-        if vault_id:
+        if not vault_id:
+            return
+        vault = self.config_data["vaults"][vault_id]
+        if vault.get("decoy_vault_id"):
+            self._enter_vault_with_decoy_check(vault_id, name)
+        else:
             self.switch_vault(vault_id)
+
+    def _enter_vault_with_decoy_check(self, front_vault_id: str, front_name: str):
+        """Vault ini punya Decoy Vault tertaut - minta password, lalu tentukan
+        mana yang dibuka berdasarkan password mana yang cocok. Hanya menerima
+        password master penuh (bukan PIN), supaya lebih pasti."""
+        front_vault = self.config_data["vaults"][front_vault_id]
+        pw = self.ask_password_dialog(
+            f"Buka Vault '{front_name}'", f"Masukkan password untuk vault '{front_name}':",
+        )
+        if pw is None:
+            self._refresh_vault_switcher()  # kembalikan tampilan dropdown kalau dibatalkan
+            return
+        if verify_password(front_vault, pw):
+            self.switch_vault(front_vault_id)
+            return
+        decoy_id = front_vault.get("decoy_vault_id")
+        if decoy_id and decoy_id in self.config_data["vaults"]:
+            decoy_vault = self.config_data["vaults"][decoy_id]
+            if verify_password(decoy_vault, pw):
+                self.switch_vault(decoy_id, display_name_override=front_name)
+                return
+        messagebox.showerror("Error", "Password salah.")
+        log_event(self.config_data, "Percobaan password salah saat membuka vault")
+        self._refresh_vault_switcher()
 
     def _build_settings_view_refresh(self):
         for w in self.views["settings"].winfo_children():
@@ -946,6 +1400,7 @@ class VaultixApp(ctk.CTk):
         box.transient(self)
         box.grab_set()
         box.resizable(False, False)
+        self.protect_window(box)
 
         result = {"value": None}
 
@@ -1038,46 +1493,65 @@ class VaultixApp(ctk.CTk):
         self.grid_columnconfigure(1, weight=1)
 
         # -- sidebar --
-        sidebar = ctk.CTkFrame(self, width=190, corner_radius=0)
+        sidebar = ctk.CTkFrame(self, width=210, corner_radius=0)
         sidebar.grid(row=0, column=0, sticky="nsw")
         sidebar.grid_propagate(False)
 
-        ctk.CTkLabel(sidebar, text="🗄 Vaultix", font=ctk.CTkFont(size=20, weight="bold")).pack(padx=20, pady=(25, 10), anchor="w")
+        brand_row = ctk.CTkFrame(sidebar, fg_color="transparent")
+        brand_row.pack(padx=20, pady=(26, 4), anchor="w", fill="x")
+        ctk.CTkLabel(brand_row, text="🗄", font=ctk.CTkFont(size=24)).pack(side="left", padx=(0, 8))
+        title_col = ctk.CTkFrame(brand_row, fg_color="transparent")
+        title_col.pack(side="left")
+        ctk.CTkLabel(title_col, text="Vaultix", font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w")
+        ctk.CTkLabel(title_col, text=self.tr("app_tagline"), text_color="#888888", font=ctk.CTkFont(size=10)).pack(anchor="w")
 
-        ctk.CTkLabel(sidebar, text="Vault Aktif", text_color="#888888").pack(padx=20, anchor="w")
-        self.vault_menu = ctk.CTkOptionMenu(sidebar, values=[""], command=self._on_vault_menu_select, width=160)
-        self.vault_menu.pack(padx=15, pady=(2, 6))
+        ctk.CTkFrame(sidebar, height=1, fg_color=("gray80", "gray25")).pack(fill="x", padx=18, pady=(16, 14))
+
+        ctk.CTkLabel(sidebar, text=self.tr("vault_active"), text_color="#888888", font=ctk.CTkFont(size=10, weight="bold")).pack(padx=20, anchor="w")
+        self.vault_menu = ctk.CTkOptionMenu(sidebar, values=[""], command=self._on_vault_menu_select, width=170, corner_radius=8)
+        self.vault_menu.pack(padx=15, pady=(4, 6))
         vault_btn_row = ctk.CTkFrame(sidebar, fg_color="transparent")
-        vault_btn_row.pack(padx=15, pady=(0, 15))
-        ctk.CTkButton(vault_btn_row, text="+ Vault", width=76, height=26, command=self.open_create_vault_dialog).pack(side="left", padx=(0, 4))
-        ctk.CTkButton(vault_btn_row, text="Ganti Nama", width=80, height=26, fg_color="gray40", hover_color="gray30", command=self.open_rename_vault_dialog).pack(side="left")
+        vault_btn_row.pack(padx=15, pady=(0, 18))
+        ctk.CTkButton(vault_btn_row, text=self.tr("btn_add_vault"), width=80, height=26, corner_radius=8, command=self.open_create_vault_dialog).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(vault_btn_row, text=self.tr("btn_rename_vault"), width=86, height=26, corner_radius=8, fg_color="gray40", hover_color="gray30", command=self.open_rename_vault_dialog).pack(side="left")
         self._refresh_vault_switcher()
 
         self.nav_buttons = {}
         nav_items = [
-            ("folders", "📁 Folders"),
-            ("encryption", "🔐 Encryption"),
-            ("dashboard", "📊 Dashboard"),
-            ("activity", "🛡 Activity"),
-            ("settings", "⚙ Settings"),
+            ("folders", "📁", self.tr("nav_folders")),
+            ("encryption", "🔐", self.tr("nav_encryption")),
+            ("dashboard", "📊", self.tr("nav_dashboard")),
+            ("activity", "🛡", self.tr("nav_activity")),
+            ("settings", "⚙", self.tr("nav_settings")),
         ]
-        for key, label in nav_items:
+        for key, icon, label in nav_items:
             btn = ctk.CTkButton(
-                sidebar, text=label, anchor="w", width=160, height=38,
-                fg_color="transparent",
+                sidebar, text=f"{icon}   {label}", anchor="w", width=180, height=40,
+                corner_radius=10, fg_color="transparent",
+                text_color=("gray10", "gray90"),
+                font=ctk.CTkFont(size=13),
                 command=lambda k=key: self.show_view(k),
             )
-            btn.pack(padx=15, pady=4)
+            btn.pack(padx=15, pady=3)
             self.nav_buttons[key] = btn
 
         ctk.CTkLabel(sidebar, text="").pack(expand=True, fill="both")  # spacer
 
-        ctk.CTkLabel(sidebar, text="Tema", text_color="#888888").pack(padx=20, anchor="w")
+        ctk.CTkFrame(sidebar, height=1, fg_color=("gray80", "gray25")).pack(fill="x", padx=18, pady=(0, 14))
+
+        ctk.CTkLabel(sidebar, text=self.tr("language_label"), text_color="#888888", font=ctk.CTkFont(size=10, weight="bold")).pack(padx=20, anchor="w")
+        self.language_menu = ctk.CTkOptionMenu(
+            sidebar, values=["Indonesia", "English"], command=self.on_language_change, width=170, corner_radius=8,
+        )
+        self.language_menu.set("English" if self.config_data.get("language", "id") == "en" else "Indonesia")
+        self.language_menu.pack(padx=15, pady=(4, 10))
+
+        ctk.CTkLabel(sidebar, text=self.tr("theme_label"), text_color="#888888", font=ctk.CTkFont(size=10, weight="bold")).pack(padx=20, anchor="w")
         self.theme_menu = ctk.CTkOptionMenu(
-            sidebar, values=["System", "Light", "Dark"], command=self.on_theme_change, width=160
+            sidebar, values=["System", "Light", "Dark"], command=self.on_theme_change, width=170, corner_radius=8,
         )
         self.theme_menu.set(self.config_data.get("theme", "System"))
-        self.theme_menu.pack(padx=15, pady=(2, 20))
+        self.theme_menu.pack(padx=15, pady=(4, 22))
 
         # -- area konten (4 view ditumpuk, ditukar lewat show_view) --
         content_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -1086,7 +1560,7 @@ class VaultixApp(ctk.CTk):
         content_container.grid_columnconfigure(0, weight=1)
 
         self.views = {}
-        for key, _ in nav_items:
+        for key, _, _ in nav_items:
             frame = ctk.CTkFrame(content_container, fg_color="transparent")
             frame.grid(row=0, column=0, sticky="nsew")
             self.views[key] = frame
@@ -1100,9 +1574,13 @@ class VaultixApp(ctk.CTk):
         self.show_view("folders")
 
     def show_view(self, key):
+        self.current_view_key = key
         self.views[key].tkraise()
         for k, btn in self.nav_buttons.items():
-            btn.configure(fg_color=("gray75", "gray25") if k == key else "transparent")
+            if k == key:
+                btn.configure(fg_color=ACCENT_SOFT, text_color=ACCENT)
+            else:
+                btn.configure(fg_color="transparent", text_color=("gray10", "gray90"))
         if key == "dashboard":
             self._build_dashboard_view(self.views["dashboard"])
         elif key == "activity":
@@ -1116,32 +1594,38 @@ class VaultixApp(ctk.CTk):
         parent.grid_columnconfigure(0, weight=1)
 
         toolbar = ctk.CTkFrame(parent, fg_color="transparent")
-        toolbar.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 10))
-        ctk.CTkLabel(toolbar, text="Daftar Folder", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
-        ctk.CTkButton(toolbar, text="+ Tambah Folder", width=140, command=self.open_add_dialog).pack(side="left", padx=(20, 8))
+        toolbar.grid(row=0, column=0, sticky="ew", padx=24, pady=(24, 12))
+        title_row = ctk.CTkFrame(toolbar, fg_color="transparent")
+        title_row.pack(fill="x")
+        ctk.CTkLabel(title_row, text="📁", font=ctk.CTkFont(size=20)).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(title_row, text=self.tr("folders_title"), font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
+        ctk.CTkButton(title_row, text=self.tr("btn_select_all"), width=110, corner_radius=8, command=self.select_all).pack(side="right", padx=(6, 0))
         ctk.CTkButton(
-            toolbar, text="Hapus dari Daftar", width=140, fg_color="#8a3b3b", hover_color="#6e2f2f",
-            command=self.remove_selected,
-        ).pack(side="left")
-        ctk.CTkButton(toolbar, text="Pilih Semua", width=110, command=self.select_all).pack(side="right", padx=(6, 0))
-        ctk.CTkButton(
-            toolbar, text="Batal Pilih Semua", width=130, fg_color="gray40", hover_color="gray30",
+            title_row, text=self.tr("btn_deselect_all"), width=130, corner_radius=8, fg_color="gray40", hover_color="gray30",
             command=self.deselect_all,
         ).pack(side="right")
 
-        list_frame = ctk.CTkFrame(parent)
-        list_frame.grid(row=1, column=0, sticky="nsew", padx=20, pady=(0, 10))
+        btn_row = ctk.CTkFrame(toolbar, fg_color="transparent")
+        btn_row.pack(fill="x", pady=(10, 0))
+        ctk.CTkButton(btn_row, text=self.tr("btn_add_folder"), width=150, corner_radius=8, command=self.open_add_dialog).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btn_row, text=self.tr("btn_remove_folder"), width=150, corner_radius=8, fg_color="#8a3b3b", hover_color="#6e2f2f",
+            command=self.remove_selected,
+        ).pack(side="left")
+
+        list_frame = ctk.CTkFrame(parent, corner_radius=CARD_RADIUS)
+        list_frame.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 12))
 
         tree_container = ctk.CTkFrame(list_frame, fg_color="transparent")
-        tree_container.pack(fill="both", expand=True, padx=10, pady=10)
+        tree_container.pack(fill="both", expand=True, padx=12, pady=12)
 
         columns = ("check", "path", "hidden", "locked", "encrypted")
         self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="none", height=10)
         self.tree.heading("check", text="✓")
-        self.tree.heading("path", text="Folder")
-        self.tree.heading("hidden", text="Status Tampilan")
-        self.tree.heading("locked", text="Status Kunci")
-        self.tree.heading("encrypted", text="Status Enkripsi")
+        self.tree.heading("path", text=self.tr("col_folder"))
+        self.tree.heading("hidden", text=self.tr("col_display_status"))
+        self.tree.heading("locked", text=self.tr("col_lock_status"))
+        self.tree.heading("encrypted", text=self.tr("col_encryption_status"))
         self.tree.column("check", width=40, anchor="center")
         self.tree.column("path", width=260)
         self.tree.column("hidden", width=120, anchor="center")
@@ -1155,32 +1639,32 @@ class VaultixApp(ctk.CTk):
         self.tree.configure(yscrollcommand=sb.set)
 
         # -- tombol aksi --
-        action_frame = ctk.CTkFrame(parent)
-        action_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 20))
+        action_frame = ctk.CTkFrame(parent, corner_radius=CARD_RADIUS)
+        action_frame.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 24))
 
         visibility_box = ctk.CTkFrame(action_frame, fg_color="transparent")
-        visibility_box.pack(side="left", expand=True, fill="both", padx=15, pady=12)
-        ctk.CTkLabel(visibility_box, text="Sembunyikan (tanpa password)", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
-        ctk.CTkButton(visibility_box, text="Sembunyikan", width=220, command=lambda: self.action_hide(True)).pack(fill="x", pady=(8, 4))
-        ctk.CTkButton(visibility_box, text="Tampilkan", width=220, command=lambda: self.action_hide(False)).pack(fill="x")
+        visibility_box.pack(side="left", expand=True, fill="both", padx=16, pady=14)
+        ctk.CTkLabel(visibility_box, text=self.tr("section_hide"), font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
+        ctk.CTkButton(visibility_box, text=self.tr("btn_hide"), width=220, corner_radius=8, command=lambda: self.action_hide(True)).pack(fill="x", pady=(8, 4))
+        ctk.CTkButton(visibility_box, text=self.tr("btn_show"), width=220, corner_radius=8, command=lambda: self.action_hide(False)).pack(fill="x")
 
         sep1 = ttk.Separator(action_frame, orient="vertical")
-        sep1.pack(side="left", fill="y", pady=12)
+        sep1.pack(side="left", fill="y", pady=14)
 
         lock_box = ctk.CTkFrame(action_frame, fg_color="transparent")
-        lock_box.pack(side="left", expand=True, fill="both", padx=15, pady=12)
-        ctk.CTkLabel(lock_box, text="Kunci (butuh password)", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
-        ctk.CTkButton(lock_box, text="Kunci", width=220, command=lambda: self.action_lock(True)).pack(fill="x", pady=(8, 4))
-        ctk.CTkButton(lock_box, text="Buka Kunci", width=220, command=lambda: self.action_lock(False)).pack(fill="x")
+        lock_box.pack(side="left", expand=True, fill="both", padx=16, pady=14)
+        ctk.CTkLabel(lock_box, text=self.tr("section_lock"), font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
+        ctk.CTkButton(lock_box, text=self.tr("btn_lock"), width=220, corner_radius=8, command=lambda: self.action_lock(True)).pack(fill="x", pady=(8, 4))
+        ctk.CTkButton(lock_box, text=self.tr("btn_unlock"), width=220, corner_radius=8, command=lambda: self.action_lock(False)).pack(fill="x")
 
         sep2 = ttk.Separator(action_frame, orient="vertical")
-        sep2.pack(side="left", fill="y", pady=12)
+        sep2.pack(side="left", fill="y", pady=14)
 
         combo_box = ctk.CTkFrame(action_frame, fg_color="transparent")
-        combo_box.pack(side="left", expand=True, fill="both", padx=15, pady=12)
-        ctk.CTkLabel(combo_box, text="Gabungan (butuh password)", font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
-        ctk.CTkButton(combo_box, text="Kunci & Sembunyikan", width=220, command=self.action_lock_and_hide).pack(fill="x", pady=(8, 4))
-        ctk.CTkButton(combo_box, text="Buka Kunci & Tampilkan", width=220, command=self.action_unlock_and_unhide).pack(fill="x")
+        combo_box.pack(side="left", expand=True, fill="both", padx=16, pady=14)
+        ctk.CTkLabel(combo_box, text=self.tr("section_combo"), font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
+        ctk.CTkButton(combo_box, text=self.tr("btn_lock_hide"), width=220, corner_radius=8, command=self.action_lock_and_hide).pack(fill="x", pady=(8, 4))
+        ctk.CTkButton(combo_box, text=self.tr("btn_unlock_show"), width=220, corner_radius=8, command=self.action_unlock_and_unhide).pack(fill="x")
 
     # -- view: pengaturan -----------------------------------------------------
     # -- view: Mode Encryption (menu terpisah dari Sembunyikan/Kunci) --------
@@ -1191,8 +1675,8 @@ class VaultixApp(ctk.CTk):
         av = self.get_active_vault()
 
         header = ctk.CTkFrame(parent, fg_color="transparent")
-        header.pack(fill="x", padx=25, pady=(20, 5))
-        ctk.CTkLabel(header, text="🔐 Mode Encryption", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        header.pack(fill="x", padx=28, pady=(24, 6))
+        ctk.CTkLabel(header, text=self.tr("encryption_title"), font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
 
         if not HAS_CRYPTO:
             ctk.CTkLabel(
@@ -1318,8 +1802,8 @@ class VaultixApp(ctk.CTk):
         self.run_bulk_action(
             entries, worker, "Mengenkripsi Folder (AES-256-GCM)...",
             "berhasil dienkripsi", "dienkripsi",
+            on_complete=lambda: self._build_encryption_view(self.views["encryption"]),
         )
-        self._build_encryption_view(self.views["encryption"])
 
     def action_decrypt(self):
         entries = self.get_selected_entries()
@@ -1347,19 +1831,19 @@ class VaultixApp(ctk.CTk):
         self.run_bulk_action(
             entries, worker, "Mendekripsi Folder...",
             "berhasil didekripsi", "didekripsi",
+            on_complete=lambda: self._build_encryption_view(self.views["encryption"]),
         )
-        self._build_encryption_view(self.views["encryption"])
 
     def _build_settings_view(self, parent):
         av = self.get_active_vault()
-        ctk.CTkLabel(parent, text="⚙ Settings", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=25, pady=(20, 0))
+        ctk.CTkLabel(parent, text=self.tr("settings_title"), font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", padx=28, pady=(24, 0))
         ctk.CTkLabel(parent, text=f"Vault aktif: {av.get('name')}", text_color="#888888").pack(anchor="w", padx=25, pady=(0, 15))
 
         scroll = ctk.CTkScrollableFrame(parent, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
 
         def setting_row(title, desc, btn_text, command, danger=False):
-            box = ctk.CTkFrame(scroll)
+            box = ctk.CTkFrame(scroll, corner_radius=CARD_RADIUS)
             box.pack(fill="x", padx=25, pady=6)
             inner = ctk.CTkFrame(box, fg_color="transparent")
             inner.pack(fill="x", padx=15, pady=12)
@@ -1368,7 +1852,7 @@ class VaultixApp(ctk.CTk):
             ctk.CTkLabel(text_col, text=title, font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w")
             ctk.CTkLabel(text_col, text=desc, text_color="#888888", anchor="w", wraplength=460, justify="left").pack(anchor="w")
             kwargs = {"fg_color": "#8a3b3b", "hover_color": "#6e2f2f"} if danger else {}
-            ctk.CTkButton(inner, text=btn_text, width=140, command=command, **kwargs).pack(side="right")
+            ctk.CTkButton(inner, text=btn_text, width=140, corner_radius=8, command=command, **kwargs).pack(side="right")
 
         setting_row(
             "Password Master", "Ganti password master yang dipakai untuk semua verifikasi.",
@@ -1393,8 +1877,64 @@ class VaultixApp(ctk.CTk):
             self.open_generate_recovery_key,
         )
 
+        if av.get("is_decoy"):
+            box = ctk.CTkFrame(scroll, corner_radius=CARD_RADIUS)
+            box.pack(fill="x", padx=25, pady=6)
+            inner = ctk.CTkFrame(box, fg_color="transparent")
+            inner.pack(fill="x", padx=15, pady=12)
+            ctk.CTkLabel(inner, text="🎭 Anda sedang berada di dalam Decoy Vault", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w")
+            ctk.CTkLabel(
+                inner,
+                text="ini tampilan alternatif yang muncul karena password decoy dimasukkan. "
+                     "Untuk kembali ke vault asli, pilih vault ini lagi di dropdown lalu masukkan "
+                     "password aslinya.",
+                text_color="#888888", wraplength=440, justify="left",
+            ).pack(anchor="w")
+        else:
+            decoy_id = av.get("decoy_vault_id")
+            if decoy_id and decoy_id in self.config_data.get("vaults", {}):
+                setting_row(
+                    "Decoy Vault",
+                    "Aktif untuk vault ini - password berbeda saat membuka vault ini akan "
+                    "menampilkan folder yang berbeda pula.",
+                    "Kelola", self.open_manage_decoy_vault,
+                )
+            else:
+                setting_row(
+                    "Decoy Vault",
+                    "Belum diaktifkan. Kalau diaktifkan, password ALTERNATIF yang Anda tentukan "
+                    "akan menampilkan folder 'biasa saja' yang berbeda dari folder asli - untuk "
+                    "kondisi terpaksa (mis. diminta buka vault di depan orang lain). BUKAN "
+                    "perlindungan level forensik - baca penjelasan sebelum mengaktifkan.",
+                    "Aktifkan", self.open_setup_decoy_vault,
+                )
+
+        # -- Security Key (FIDO2) - BETA --
+        if HAS_FIDO2:
+            sk_registered = bool(av.get("security_key_credential"))
+            sk_desc = (
+                "Terdaftar (BETA). Bisa dipakai sebagai alternatif verifikasi - "
+                "sentuh kunci fisik saat diminta."
+                if sk_registered else
+                "Belum didaftarkan. FITUR BETA: pakai kunci keamanan fisik FIDO2 (mis. YubiKey) "
+                "sebagai alternatif verifikasi - komunikasi langsung ke USB, bukan lewat WinRT "
+                "(beda dari Windows Hello), tapi belum diuji menyeluruh di berbagai merek kunci."
+            )
+            setting_row(
+                "Security Key (FIDO2) — BETA", sk_desc,
+                "Lepas Pendaftaran" if sk_registered else "Daftarkan Kunci",
+                self.open_remove_security_key if sk_registered else self.open_register_security_key,
+                danger=sk_registered,
+            )
+        else:
+            setting_row(
+                "Security Key (FIDO2) — BETA",
+                "Package 'fido2' belum terinstall. Jalankan: pip install fido2, lalu buka lagi Vaultix.",
+                "Info", lambda: messagebox.showinfo("Info", "Jalankan: pip install fido2"),
+            )
+
         # -- Windows Hello: DINONAKTIFKAN SEMENTARA, lihat catatan di kode --
-        box = ctk.CTkFrame(scroll)
+        box = ctk.CTkFrame(scroll, corner_radius=CARD_RADIUS)
         box.pack(fill="x", padx=25, pady=6)
         inner = ctk.CTkFrame(box, fg_color="transparent")
         inner.pack(fill="x", padx=15, pady=12)
@@ -1421,7 +1961,7 @@ class VaultixApp(ctk.CTk):
         )
 
         # -- Auto Lock (punya switch on/off, bukan cuma tombol) --
-        box = ctk.CTkFrame(scroll)
+        box = ctk.CTkFrame(scroll, corner_radius=CARD_RADIUS)
         box.pack(fill="x", padx=25, pady=6)
         inner = ctk.CTkFrame(box, fg_color="transparent")
         inner.pack(fill="x", padx=15, pady=12)
@@ -1442,6 +1982,59 @@ class VaultixApp(ctk.CTk):
             btn_col, text="", variable=self.auto_lock_switch_var, command=self._toggle_auto_lock, width=40,
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(btn_col, text="Konfigurasi", width=110, command=self.open_auto_lock_settings).pack(side="left")
+
+        # -- Screenshot Protection (global, bukan per-vault - lihat catatan di kode) --
+        box = ctk.CTkFrame(scroll, corner_radius=CARD_RADIUS)
+        box.pack(fill="x", padx=25, pady=6)
+        inner = ctk.CTkFrame(box, fg_color="transparent")
+        inner.pack(fill="x", padx=15, pady=12)
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(text_col, text="Screenshot & Screen-Recording Protection", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w")
+        ctk.CTkLabel(
+            text_col,
+            text="Mencegah jendela Vaultix (daftar folder, Recovery Key, dialog password, dll) "
+                 "tertangkap di screenshot/perekaman layar/remote desktop - tampil hitam/kosong "
+                 "di hasil tangkapan, tetap normal di layar Anda. HANYA melindungi jendela "
+                 "Vaultix sendiri, TIDAK melindungi isi folder asli di File Explorer. Butuh "
+                 "Windows 10 versi 2004 ke atas; berlaku untuk jendela baru yang dibuka "
+                 "setelah diaktifkan.",
+            text_color="#888888", anchor="w", wraplength=440, justify="left",
+        ).pack(anchor="w")
+        self.screenshot_protection_switch_var = tk.BooleanVar(
+            value=self.config_data.get("screenshot_protection_enabled", False)
+        )
+        ctk.CTkSwitch(
+            inner, text="", variable=self.screenshot_protection_switch_var,
+            command=self._toggle_screenshot_protection, width=40,
+        ).pack(side="right")
+
+        # -- Clipboard Protection (global, bukan per-vault) --
+        box = ctk.CTkFrame(scroll, corner_radius=CARD_RADIUS)
+        box.pack(fill="x", padx=25, pady=6)
+        inner = ctk.CTkFrame(box, fg_color="transparent")
+        inner.pack(fill="x", padx=15, pady=12)
+        text_col = ctk.CTkFrame(inner, fg_color="transparent")
+        text_col.pack(side="left", fill="x", expand=True)
+        ctk.CTkLabel(text_col, text="Clipboard Protection", font=ctk.CTkFont(size=13, weight="bold"), anchor="w").pack(anchor="w")
+        clear_seconds = self.config_data.get("clipboard_auto_clear_seconds", 30)
+        ctk.CTkLabel(
+            text_col,
+            text=f"Data sensitif yang disalin (mis. Recovery Key) otomatis dibersihkan dari "
+                 f"clipboard setelah {clear_seconds} detik, dan dikecualikan dari Clipboard "
+                 "History (Win+V) & Cloud Clipboard Windows.",
+            text_color="#888888", anchor="w", wraplength=400, justify="left",
+        ).pack(anchor="w")
+        btn_col = ctk.CTkFrame(inner, fg_color="transparent")
+        btn_col.pack(side="right")
+        self.clipboard_protection_switch_var = tk.BooleanVar(
+            value=self.config_data.get("clipboard_protection_enabled", True)
+        )
+        ctk.CTkSwitch(
+            btn_col, text="", variable=self.clipboard_protection_switch_var,
+            command=self._toggle_clipboard_protection, width=40,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(btn_col, text="Konfigurasi", width=110, command=self.open_clipboard_protection_settings).pack(side="left")
 
         setting_row(
             "Hapus Vault Ini",
@@ -1620,11 +2213,11 @@ class VaultixApp(ctk.CTk):
         style = ttk.Style()
         style.theme_use("clam")
         if mode == "Dark":
-            bg, fg, field_bg, sel = "#2b2b2b", "#e8e8e8", "#242424", "#1f6aa5"
+            bg, fg, field_bg, sel = "#242424", "#e8e8e8", "#1e1e1e", ACCENT[1]
         else:
-            bg, fg, field_bg, sel = "#f2f2f2", "#1a1a1a", "#ffffff", "#3a7ebf"
-        style.configure("Treeview", background=field_bg, fieldbackground=field_bg, foreground=fg, rowheight=26, borderwidth=0)
-        style.configure("Treeview.Heading", background=bg, foreground=fg, borderwidth=0)
+            bg, fg, field_bg, sel = "#f2f2f2", "#1a1a1a", "#ffffff", ACCENT[0]
+        style.configure("Treeview", background=field_bg, fieldbackground=field_bg, foreground=fg, rowheight=28, borderwidth=0)
+        style.configure("Treeview.Heading", background=bg, foreground=fg, borderwidth=0, font=("", 10, "bold"))
         style.map("Treeview", background=[("selected", sel)], foreground=[("selected", "#ffffff")])
 
     # -- list -----------------------------------------------------------------
@@ -1691,6 +2284,23 @@ class VaultixApp(ctk.CTk):
                 log_event(self.config_data, f"Percobaan verifikasi Windows Hello gagal: {detail}")
                 return False
 
+        if vault.get("security_key_credential") and HAS_FIDO2:
+            if messagebox.askyesno(
+                title,
+                f"Verifikasi vault '{vault.get('name')}' dengan Security Key (FIDO2, BETA)?\n\n"
+                "Pilih \"No\" untuk pakai password/PIN biasa.",
+            ):
+                ok, msg = self._run_fido2_operation(
+                    "Verifikasi Security Key", "Sentuh kunci keamanan Anda sekarang...",
+                    lambda: verify_security_key(vault["security_key_credential"]),
+                )
+                if ok:
+                    log_event(self.config_data, "Verifikasi berhasil menggunakan Security Key")
+                    return True
+                messagebox.showerror("Gagal", f"Verifikasi Security Key gagal:\n\n{msg}")
+                log_event(self.config_data, f"Percobaan verifikasi Security Key gagal: {msg}")
+                return False
+
         prompt = f"Masukkan password master vault '{vault.get('name')}':"
         if vault.get("pin_enabled"):
             prompt += "\n(atau PIN Anda)"
@@ -1715,10 +2325,66 @@ class VaultixApp(ctk.CTk):
         else:
             messagebox.showinfo("Sukses", summary)
 
-    def run_bulk_action(self, entries, worker, title, verb_success, verb_failed):
+    # -- security key (FIDO2) helper: jalankan operasi blocking di background thread --
+    def _run_fido2_operation(self, title, message, operation_fn):
+        """Jalankan operasi FIDO2 (register/verify) - keduanya BLOCKING
+        menunggu sentuhan fisik - di background thread dengan dialog
+        progress, supaya UI tidak freeze. operation_fn: callable() -> (bool, str)."""
+        result_holder = {}
+        box = ctk.CTkToplevel(self)
+        box.title(title)
+        W, H = 380, 160
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.protocol("WM_DELETE_WINDOW", lambda: None)
+        self.protect_window(box)
+
+        ctk.CTkLabel(box, text=message, wraplength=340, justify="left").pack(padx=20, pady=(20, 10))
+        bar = ctk.CTkProgressBar(box, mode="indeterminate")
+        bar.pack(fill="x", padx=20, pady=10)
+        bar.start()
+
+        result_queue = queue.Queue()
+
+        def worker():
+            try:
+                ok, msg = operation_fn()
+            except Exception as e:
+                ok, msg = False, f"Error tak terduga: {e}"
+            result_queue.put((ok, msg))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def poll():
+            try:
+                ok, msg = result_queue.get_nowait()
+                bar.stop()
+                box.destroy()
+                result_holder["ok"] = ok
+                result_holder["msg"] = msg
+                return
+            except queue.Empty:
+                pass
+            box.after(100, poll)
+
+        box.after(100, poll)
+        box.wait_window()
+        return result_holder.get("ok", False), result_holder.get("msg", "Tidak ada respons.")
+
+    def run_bulk_action(self, entries, worker, title, verb_success, verb_failed, on_complete=None):
         """Jalankan `worker(entry)` untuk setiap entry di background thread
         sambil menampilkan progress bar, supaya UI tidak macet saat memproses
         folder besar (icacls/atribut pada folder besar bisa memakan waktu).
+
+        CATATAN PENTING: method ini ASYNCHRONOUS - kembali (return) seketika
+        setelah menjadwalkan background thread, BUKAN menunggu sampai proses
+        selesai. Kalau ada yang perlu dijalankan setelah proses BENAR-BENAR
+        tuntas (mis. refresh tampilan halaman lain yang menampilkan status
+        hasil aksi ini), pakai parameter on_complete - JANGAN taruh kode
+        setelah pemanggilan run_bulk_action() dengan asumsi itu jalan
+        belakangan, karena akan jalan duluan sebelum prosesnya selesai.
 
         Selama proses berjalan, folder yang diproses ditandai di
         self.paths_in_progress supaya Auto Lock (yang jalan di timer latar
@@ -1778,6 +2444,8 @@ class VaultixApp(ctk.CTk):
                         save_config(self.config_data)
                         self.refresh_list()
                         self.show_result_summary(success, failed, verb_success, verb_failed)
+                        if on_complete:
+                            on_complete()
                         return
             except queue.Empty:
                 pass
@@ -1799,9 +2467,14 @@ class VaultixApp(ctk.CTk):
 
     def _warn_duplicate_folders(self):
         """Deteksi folder yang sudah kadung terdaftar di lebih dari satu
-        vault (dari sebelum validasi ini ada) dan beri tahu pengguna."""
+        vault (dari sebelum validasi ini ada) dan beri tahu pengguna.
+        Vault decoy sengaja DILEWATI dari pengecekan ini - kalau ikut
+        dicek, nama vault decoy bisa bocor lewat dialog peringatan ini
+        dan merusak tujuan kerahasiaannya."""
         seen = {}
         for vault in self.config_data.get("vaults", {}).values():
+            if vault.get("is_decoy"):
+                continue
             for entry in vault.get("folders", []):
                 seen.setdefault(entry["path"], []).append(vault.get("name"))
         duplicates = {path: names for path, names in seen.items() if len(names) > 1}
@@ -1990,23 +2663,35 @@ class VaultixApp(ctk.CTk):
             vault_label, vault_color = "Lemah", "red"
 
         def status_row(box, label, value, color, note=None):
-            dot = {"green": "🟢", "yellow": "🟡", "red": "🔴"}[color]
             row = ctk.CTkFrame(box, fg_color="transparent")
-            row.pack(fill="x", pady=3)
-            ctk.CTkLabel(row, text=f"{dot} {label}", anchor="w", width=190, font=ctk.CTkFont(size=13)).pack(side="left")
-            ctk.CTkLabel(row, text=value, anchor="w", font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+            row.pack(fill="x", pady=5)
+            ctk.CTkLabel(row, text=label, anchor="w", width=190, font=ctk.CTkFont(size=13)).pack(side="left")
+            badge_colors = BADGE_COLORS[color]
+            badge = ctk.CTkFrame(row, fg_color=badge_colors["bg"], corner_radius=999)
+            badge.pack(side="left")
+            ctk.CTkLabel(
+                badge, text=f"  {value}  ", text_color=badge_colors["fg"],
+                font=ctk.CTkFont(size=12, weight="bold"),
+            ).pack(padx=2, pady=3)
             if note:
-                ctk.CTkLabel(box, text=note, text_color="#888888", wraplength=520, justify="left").pack(anchor="w", padx=(28, 0), pady=(0, 4))
+                ctk.CTkLabel(box, text=note, text_color="#888888", wraplength=520, justify="left").pack(anchor="w", padx=(0, 0), pady=(2, 6))
 
         header = ctk.CTkFrame(parent, fg_color="transparent")
-        header.pack(fill="x", padx=25, pady=(20, 10))
-        ctk.CTkLabel(header, text=f"SECURITY STATUS — {av.get('name')}", font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
-        ctk.CTkButton(header, text="Refresh", width=90, command=lambda: self._build_dashboard_view(parent)).pack(side="right")
+        header.pack(fill="x", padx=28, pady=(24, 4))
+        title_row = ctk.CTkFrame(header, fg_color="transparent")
+        title_row.pack(fill="x")
+        ctk.CTkLabel(title_row, text="📊", font=ctk.CTkFont(size=20)).pack(side="left", padx=(0, 8))
+        ctk.CTkLabel(title_row, text=self.tr("dashboard_title"), font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
+        ctk.CTkButton(
+            title_row, text=self.tr("btn_refresh"), width=100, corner_radius=8,
+            command=lambda: self._build_dashboard_view(parent),
+        ).pack(side="right")
+        ctk.CTkLabel(header, text=av.get("name"), text_color="#888888", font=ctk.CTkFont(size=13)).pack(anchor="w", pady=(2, 0))
 
-        status_box = ctk.CTkFrame(parent)
-        status_box.pack(fill="x", padx=25, pady=(0, 15))
+        status_box = ctk.CTkFrame(parent, corner_radius=CARD_RADIUS)
+        status_box.pack(fill="x", padx=28, pady=(14, 16))
         inner = ctk.CTkFrame(status_box, fg_color="transparent")
-        inner.pack(fill="x", padx=15, pady=15)
+        inner.pack(fill="x", padx=18, pady=18)
 
         status_row(inner, "Vault Security", vault_label, vault_color)
         encrypted_count = sum(1 for f in folders if f.get("encrypted"))
@@ -2027,26 +2712,30 @@ class VaultixApp(ctk.CTk):
             f"{auto_lock_minutes} menit" if auto_lock_on else "Nonaktif",
             "green" if auto_lock_on else "red",
         )
+        clipboard_on = self.config_data.get("clipboard_protection_enabled", True)
         status_row(
-            inner, "Clipboard Protection", "Belum direncanakan", "red",
-            note="Ada di roadmap #12, belum dikerjakan.",
+            inner, "Clipboard Protection",
+            "Enabled" if clipboard_on else "Nonaktif",
+            "green" if clipboard_on else "red",
         )
 
-        ctk.CTkLabel(parent, text="Folder", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w", padx=25, pady=(0, 0))
+        folder_header = ctk.CTkFrame(parent, fg_color="transparent")
+        folder_header.pack(fill="x", padx=28)
+        ctk.CTkLabel(folder_header, text="📁 Folder", font=ctk.CTkFont(size=15, weight="bold")).pack(anchor="w")
         ctk.CTkLabel(
-            parent, text=f"{locked_count} dari {total} folder terkunci · {hidden_count} dari {total} tersembunyi",
+            folder_header, text=f"{locked_count} dari {total} folder terkunci · {hidden_count} dari {total} tersembunyi",
             text_color="#888888",
-        ).pack(anchor="w", padx=25, pady=(0, 8))
+        ).pack(anchor="w", pady=(0, 8))
 
-        list_box = ctk.CTkScrollableFrame(parent)
-        list_box.pack(fill="both", expand=True, padx=25, pady=(0, 20))
+        list_box = ctk.CTkScrollableFrame(parent, corner_radius=CARD_RADIUS)
+        list_box.pack(fill="both", expand=True, padx=28, pady=(0, 24))
 
         if not folders:
-            ctk.CTkLabel(list_box, text="Belum ada folder di daftar.", text_color="#888888").pack(anchor="w", pady=10)
+            ctk.CTkLabel(list_box, text="Belum ada folder di daftar.", text_color="#888888").pack(anchor="w", pady=10, padx=6)
         else:
             for entry in folders:
                 row = ctk.CTkFrame(list_box, fg_color="transparent")
-                row.pack(fill="x", pady=2)
+                row.pack(fill="x", pady=3, padx=4)
                 name = os.path.basename(entry["path"].rstrip("\\/")) or entry["path"]
                 icon = "🔒" if entry.get("locked") else "🔓"
                 ctk.CTkLabel(row, text=name, anchor="w", width=280).pack(side="left")
@@ -2055,22 +2744,24 @@ class VaultixApp(ctk.CTk):
     # -- security activity log -------------------------------------------
     def _build_activity_view(self, parent):
         ctk.CTkLabel(
-            parent, text="🛡 Aktivitas Keamanan", font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack(anchor="w", padx=25, pady=(20, 5))
+            parent, text=self.tr("activity_title"), font=ctk.CTkFont(size=20, weight="bold"),
+        ).pack(anchor="w", padx=28, pady=(24, 5))
         ctk.CTkLabel(
             parent,
             text="Catatan kejadian keamanan Vaultix: password diverifikasi/salah,\n"
                  "folder dikunci/dibuka, dan aksi lainnya. Disimpan lokal di perangkat ini.",
             justify="left", text_color="#888888",
-        ).pack(anchor="w", padx=25, pady=(0, 10))
+        ).pack(anchor="w", padx=28, pady=(0, 12))
 
+        tree_card = ctk.CTkFrame(parent, corner_radius=CARD_RADIUS)
+        tree_card.pack(fill="both", expand=True, padx=28, pady=(0, 6))
         columns = ("time", "event")
-        self.activity_tree = ttk.Treeview(parent, columns=columns, show="headings", height=16)
+        self.activity_tree = ttk.Treeview(tree_card, columns=columns, show="headings", height=16)
         self.activity_tree.heading("time", text="Waktu")
         self.activity_tree.heading("event", text="Kejadian")
         self.activity_tree.column("time", width=160)
         self.activity_tree.column("event", width=500)
-        self.activity_tree.pack(fill="both", expand=True, padx=25)
+        self.activity_tree.pack(fill="both", expand=True, padx=12, pady=12)
 
         def clear_log():
             if not messagebox.askyesno("Konfirmasi", "Hapus seluruh riwayat aktivitas keamanan?"):
@@ -2080,10 +2771,10 @@ class VaultixApp(ctk.CTk):
             self.refresh_activity_log()
 
         btn_row = ctk.CTkFrame(parent, fg_color="transparent")
-        btn_row.pack(fill="x", padx=25, pady=15)
-        ctk.CTkButton(btn_row, text="Refresh", width=90, command=self.refresh_activity_log).pack(side="right")
+        btn_row.pack(fill="x", padx=28, pady=(0, 20))
+        ctk.CTkButton(btn_row, text=self.tr("btn_refresh"), width=100, corner_radius=8, command=self.refresh_activity_log).pack(side="right")
         ctk.CTkButton(
-            btn_row, text="Bersihkan Log", width=120, fg_color="gray40", hover_color="gray30", command=clear_log,
+            btn_row, text="Bersihkan Log", width=130, corner_radius=8, fg_color="gray40", hover_color="gray30", command=clear_log,
         ).pack(side="right", padx=8)
 
     def refresh_activity_log(self):
@@ -2101,6 +2792,7 @@ class VaultixApp(ctk.CTk):
         dialog.geometry(f"{W}x{H}")
         center_window(dialog, W, H)
         dialog.transient(self)
+        self.protect_window(dialog)
 
         tabs = ctk.CTkTabview(dialog, width=W - 30, height=H - 30)
         tabs.pack(fill="both", expand=True, padx=10, pady=10)
@@ -2373,6 +3065,7 @@ class VaultixApp(ctk.CTk):
         box.grab_set()
         box.resizable(False, False)
         box.protocol("WM_DELETE_WINDOW", lambda: None)  # cegah ditutup tanpa konfirmasi "sudah simpan"
+        self.protect_window(box)
 
         ctk.CTkLabel(
             box, text=f"Recovery Key untuk vault '{vault_name}'",
@@ -2401,8 +3094,13 @@ class VaultixApp(ctk.CTk):
         ).pack(padx=20, pady=(10, 15))
 
         def copy_key():
-            self.clipboard_clear()
-            self.clipboard_append(key)
+            self.copy_sensitive_to_clipboard(key)
+            if self.config_data.get("clipboard_protection_enabled", True):
+                seconds = self.config_data.get("clipboard_auto_clear_seconds", 30)
+                messagebox.showinfo(
+                    "Disalin", f"Recovery key disalin. Clipboard akan otomatis dibersihkan "
+                    f"dalam {seconds} detik.", parent=box,
+                )
 
         def send_email():
             subject = f"Vaultix Recovery Key - {vault_name}"
@@ -2463,6 +3161,160 @@ class VaultixApp(ctk.CTk):
         log_event(self.config_data, f"Password vault '{vault.get('name')}' direset lewat recovery key")
         messagebox.showinfo("Sukses", "Password master berhasil direset.")
 
+    # -- decoy vault ------------------------------------------------------
+    def open_setup_decoy_vault(self):
+        vault = self.get_active_vault()
+        if not self.ask_master_password(f"Verifikasi Password Vault '{vault.get('name')}'"):
+            return
+        if not messagebox.askyesno(
+            "Aktifkan Decoy Vault?",
+            "Decoy Vault membuat vault tersembunyi kedua yang hanya muncul kalau password "
+            "DECOY dimasukkan saat membuka vault ini - password asli tetap menampilkan vault "
+            "asli seperti biasa.\n\n"
+            "PENTING: ini BUKAN perlindungan level forensik. Kalau file config.json Vaultix "
+            "diperiksa langsung oleh yang paham strukturnya, keberadaan decoy vault masih bisa "
+            "terlihat. Fitur ini untuk skenario 'diminta buka vault di depan orang lain', bukan "
+            "untuk menghindari analisis forensik mendalam.\n\nLanjutkan?",
+        ):
+            return
+
+        decoy_pw = self.ask_password_dialog(
+            "Buat Password Decoy",
+            f"Buat password DECOY untuk vault '{vault.get('name')}'\n"
+            "(harus BEDA dari password asli, minimal 4 karakter):",
+            confirm=True,
+        )
+        if decoy_pw is None:
+            return
+        if verify_password(vault, decoy_pw):
+            messagebox.showerror("Error", "Password decoy tidak boleh sama dengan password asli.")
+            return
+
+        decoy_id = secrets.token_hex(4)
+        decoy_vault = new_vault_dict(f"{vault.get('name')} (decoy)")
+        decoy_vault["is_decoy"] = True
+        set_master_password(decoy_vault, decoy_pw)
+        self.config_data["vaults"][decoy_id] = decoy_vault
+        vault["decoy_vault_id"] = decoy_id
+        save_config(self.config_data)
+        log_event(self.config_data, "Decoy Vault diaktifkan untuk salah satu vault")
+        messagebox.showinfo(
+            "Sukses",
+            "Decoy Vault berhasil dibuat. Sekarang isi dengan folder 'biasa saja': pilih vault "
+            "ini lagi dari dropdown, masukkan password DECOY (bukan password asli), lalu "
+            "tambahkan folder seperti biasa.",
+        )
+        self._build_settings_view_refresh()
+
+    def open_manage_decoy_vault(self):
+        vault = self.get_active_vault()
+        decoy_id = vault.get("decoy_vault_id")
+        if not decoy_id or decoy_id not in self.config_data["vaults"]:
+            messagebox.showinfo("Info", "Vault ini tidak punya Decoy Vault aktif.")
+            return
+        if not self.ask_master_password(f"Verifikasi Password Vault '{vault.get('name')}'"):
+            return
+        decoy_vault = self.config_data["vaults"][decoy_id]
+
+        box = ctk.CTkToplevel(self)
+        box.title("Kelola Decoy Vault")
+        W, H = 420, 260
+        box.geometry(f"{W}x{H}")
+        center_window(box, W, H)
+        box.transient(self)
+        box.grab_set()
+        box.resizable(False, False)
+        self.protect_window(box)
+
+        ctk.CTkLabel(box, text="Decoy Vault aktif untuk vault ini.", font=ctk.CTkFont(weight="bold")).pack(padx=20, pady=(20, 5))
+        ctk.CTkLabel(
+            box,
+            text="Untuk mengisi/mengecek folder di dalamnya: pilih vault ini lagi dari "
+                 "dropdown lalu masukkan password decoy (bukan password asli).",
+            text_color="#888888", wraplength=360, justify="left",
+        ).pack(padx=20, pady=(0, 15))
+
+        def change_decoy_password():
+            new_pw = self.ask_password_dialog(
+                "Ganti Password Decoy", "Buat password decoy baru (minimal 4 karakter):", confirm=True,
+            )
+            if new_pw is None:
+                return
+            if verify_password(vault, new_pw):
+                messagebox.showerror("Error", "Password decoy tidak boleh sama dengan password asli.", parent=box)
+                return
+            set_master_password(decoy_vault, new_pw)
+            save_config(self.config_data)
+            log_event(self.config_data, "Password Decoy Vault diganti")
+            messagebox.showinfo("Sukses", "Password decoy berhasil diganti.", parent=box)
+
+        def remove_decoy():
+            if not messagebox.askyesno(
+                "Konfirmasi",
+                "Nonaktifkan & hapus Decoy Vault ini? Folder yang ada di dalamnya akan ikut "
+                "terhapus dari daftar Vaultix (folder aslinya di disk TIDAK dihapus).",
+                parent=box,
+            ):
+                return
+            del self.config_data["vaults"][decoy_id]
+            vault["decoy_vault_id"] = None
+            save_config(self.config_data)
+            log_event(self.config_data, "Decoy Vault dinonaktifkan")
+            box.destroy()
+            self._build_settings_view_refresh()
+
+        btn_frame = ctk.CTkFrame(box, fg_color="transparent")
+        btn_frame.pack(pady=10)
+        ctk.CTkButton(btn_frame, text="Ganti Password Decoy", width=170, command=change_decoy_password).pack(side="left", padx=5)
+        ctk.CTkButton(
+            btn_frame, text="Hapus Decoy Vault", width=150, fg_color="#8a3b3b", hover_color="#6e2f2f",
+            command=remove_decoy,
+        ).pack(side="left", padx=5)
+
+    # -- security key (FIDO2) - BETA -----------------------------------------
+    def open_register_security_key(self):
+        if not HAS_FIDO2:
+            messagebox.showerror("Error", "Package 'fido2' belum terinstall.\n\npip install fido2")
+            return
+        vault = self.get_active_vault()
+        if not self.ask_master_password(f"Verifikasi Password Vault '{vault.get('name')}'"):
+            return
+        if not messagebox.askyesno(
+            "Daftarkan Security Key? (BETA)",
+            "Colokkan kunci keamanan FIDO2 (mis. YubiKey) ke port USB SEKARANG, "
+            "lalu klik Yes. Anda akan diminta menyentuh tombol fisik di kunci itu "
+            "begitu proses dimulai.\n\n"
+            "Fitur ini masih BETA - kalau gagal, vault tetap aman dipakai lewat "
+            "password/PIN seperti biasa.",
+        ):
+            return
+
+        ok, result = self._run_fido2_operation(
+            "Mendaftarkan Security Key", "Sentuh kunci keamanan Anda sekarang...",
+            lambda: register_security_key(vault.get("name")),
+        )
+        if not ok:
+            messagebox.showerror("Gagal", result)
+            log_event(self.config_data, f"Registrasi Security Key gagal: {result}")
+            return
+        vault["security_key_credential"] = result
+        save_config(self.config_data)
+        log_event(self.config_data, "Security Key (FIDO2) berhasil didaftarkan")
+        messagebox.showinfo("Sukses", "Security Key berhasil didaftarkan.")
+        self._build_settings_view_refresh()
+
+    def open_remove_security_key(self):
+        vault = self.get_active_vault()
+        if not self.ask_master_password(f"Verifikasi Password Vault '{vault.get('name')}'"):
+            return
+        if not messagebox.askyesno("Konfirmasi", "Lepas pendaftaran Security Key dari vault ini?"):
+            return
+        vault["security_key_credential"] = None
+        save_config(self.config_data)
+        log_event(self.config_data, "Security Key (FIDO2) dilepas dari vault")
+        messagebox.showinfo("Sukses", "Security Key dilepas.")
+        self._build_settings_view_refresh()
+
 
 def main():
     init_com_sta()
@@ -2478,6 +3330,7 @@ def main():
         )
         sys.exit(1)
 
+    ctk.set_default_color_theme("dark-blue")  # tema bawaan CTk yang lebih premium/modern dari default
     app = VaultixApp()
     app.mainloop()
 
